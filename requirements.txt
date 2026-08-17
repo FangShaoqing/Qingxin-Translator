@@ -1,0 +1,23 @@
+# Qingxin Translator Dependencies
+
+# GUI Framework
+pywebview>=5.0
+
+# Translation Engines
+httpx>=0.24.0
+
+# Database
+peewee>=3.17.0
+
+# System Integration
+pywin32>=306
+pystray>=0.19.0
+
+# Language Detection
+langdetect>=1.0.9
+
+# Image Processing (for icon generation)
+Pillow>=10.0.0
+
+# Packaging
+pyinstaller>=6.0.0

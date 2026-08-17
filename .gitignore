@@ -1,0 +1,30 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# 数据文件
+data/config.json
+data/history.db
+data/logs/
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# PyInstaller
+*.spec
+
+# 安装程序输出
+installer_output/
+
+# 系统文件
+Thumbs.db
+Desktop.ini

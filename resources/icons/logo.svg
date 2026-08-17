@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <!-- 樱花粉渐变 -->
+    <linearGradient id="pinkGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FADADE;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#F0C4C8;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- 背景圆角方形 -->
+  <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="white"/>
+  
+  <!-- Q变形为问号的主体 -->
+  <!-- Q的圆形部分 -->
+  <circle cx="128" cy="110" r="55" fill="none" stroke="url(#pinkGradient)" stroke-width="12"/>
+  
+  <!-- Q的尾巴（向右下延伸，变形为问号的点） -->
+  <line x1="160" y1="140" x2="180" y2="175" stroke="url(#pinkGradient)" stroke-width="12" stroke-linecap="round"/>
+  
+  <!-- 问号的点 -->
+  <circle cx="185" cy="190" r="8" fill="url(#pinkGradient)"/>
+  
+  <!-- 应用名称 -->
+  <text x="128" y="240" text-anchor="middle" font-family="Source Han Sans, Microsoft YaHei, sans-serif" font-size="24" font-weight="bold" fill="#333333">青欣翻译</text>
+</svg>

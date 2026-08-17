@@ -1,0 +1,1 @@
+# Qingxin Translator - Core Module

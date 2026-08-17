@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>青欣翻译</title>
+    <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+    <!-- 标题栏 -->
+    <div class="title-bar">
+        <div class="nav-icons">
+            <button class="nav-btn active" data-page="translate" title="翻译">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"/>
+                </svg>
+            </button>
+            <button class="nav-btn" data-page="history" title="历史记录">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12 6 12 12 16 14"/>
+                </svg>
+            </button>
+            <button class="nav-btn" data-page="settings" title="设置">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+                </svg>
+            </button>
+        </div>
+        <div class="window-controls">
+            <button class="window-btn" id="pin-btn" title="钉住窗口">
+                <svg class="window-icon pin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M12 17v5M9 4h6v7l3 4H6l3-4V4z"/>
+                </svg>
+            </button>
+            <button class="window-btn" id="minimize-btn" title="最小化">
+                <svg class="window-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+            </button>
+            <button class="window-btn" id="close-btn" title="关闭">
+                <svg class="window-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <line x1="18" y1="6" x2="6" y2="18"/>
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- 主要内容区域 -->
+    <div class="content">
+        <!-- 翻译页面 -->
+        <div id="translate-page" class="page active">
+            <div class="input-area">
+                <textarea id="source-text" placeholder="请输入文本" rows="3"></textarea>
+            </div>
+            <div class="output-area" id="output-area">
+                <div class="translation-content">
+                    <div id="translated-text"></div>
+                </div>
+                <div class="translation-actions">
+                    <button class="translation-btn" id="copy-translation" title="复制">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                        </svg>
+                    </button>
+                    <button class="translation-btn" id="speak-translation" title="朗读">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                            <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 历史记录页面 -->
+        <div id="history-page" class="page">
+            <div class="search-area">
+                <input type="text" id="search-input" placeholder="搜索收藏" class="search-input">
+                <button id="clear-btn" class="clear-btn">清空</button>
+            </div>
+            <div class="history-list" id="history-list">
+                <!-- 历史记录将通过JS动态加载 -->
+            </div>
+        </div>
+
+        <!-- 设置页面 -->
+        <div id="settings-page" class="page">
+            <div class="settings-scroll">
+                <!-- 通用设置 -->
+                <div class="settings-card">
+                    <h3 class="card-title">通用</h3>
+                    <div class="setting-item">
+                        <span class="setting-label">自动复制译文</span>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="auto-copy" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">最小化到托盘</span>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="minimize-to-tray" checked>
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">开机自启动</span>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="launch-at-startup">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">窗口唤醒快捷键</span>
+                        <div class="setting-control">
+                            <input type="text" id="hotkey" class="hotkey-input" placeholder="点击设置" readonly>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">划词翻译快捷键</span>
+                        <div class="setting-control">
+                            <input type="text" id="selection-hotkey" class="hotkey-input" placeholder="点击设置" readonly>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 翻译引擎设置 -->
+                <div class="settings-card">
+                    <h3 class="card-title">翻译引擎</h3>
+                    <div class="setting-item">
+                        <span class="setting-label">API URL</span>
+                        <input type="text" id="api-url" class="setting-input" placeholder="请输入API URL">
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">API Key</span>
+                        <div class="input-with-icon">
+                            <input type="password" id="api-key" class="setting-input" placeholder="请输入API Key">
+                            <button class="toggle-visibility" id="toggle-key-visibility">
+                                <svg class="eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                    <circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="setting-item model-row">
+                        <span class="setting-label">模型名称</span>
+                        <select id="model-select" class="setting-select">
+                            <option value="">请选择模型</option>
+                        </select>
+                        <div class="model-buttons">
+                            <button id="refresh-models" class="btn-secondary">模型列表</button>
+                            <button id="test-connection" class="btn-secondary">测试连接</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast提示 -->
+    <div id="toast" class="toast"></div>
+
+    <!-- 自定义确认弹窗 -->
+    <div id="confirm-modal" class="modal-overlay">
+        <div class="modal-dialog">
+            <div class="modal-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="10"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                </svg>
+            </div>
+            <div class="modal-body">
+                <div class="modal-title" id="confirm-title">确认操作</div>
+                <div class="modal-message" id="confirm-message">确定要执行此操作吗？</div>
+            </div>
+            <div class="modal-actions">
+                <button class="modal-btn modal-btn-cancel" id="confirm-cancel">取消</button>
+                <button class="modal-btn modal-btn-confirm" id="confirm-ok">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="scripts/app.js"></script>
+</body>
+</html>
