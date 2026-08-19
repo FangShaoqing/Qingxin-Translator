@@ -3,6 +3,7 @@ Qingxin Translator - Main Entry Point (pywebview)
 青欣翻译 - 程序入口
 """
 
+import os
 import sys
 import threading
 from pathlib import Path
@@ -127,6 +128,31 @@ def _find_window_hwnd():
     return found[0]
 
 
+def _save_window_position(window) -> None:
+    """保存主窗口位置和大小到配置（下次启动恢复）"""
+    try:
+        x = window.x
+        y = window.y
+        w = window.width
+        h = window.height
+        if x is None or y is None:
+            return
+        # 避免保存屏幕外位置（窗口可能被拖出屏幕边界）
+        import ctypes
+        user32 = ctypes.windll.user32
+        screen_w = user32.GetSystemMetrics(0)
+        screen_h = user32.GetSystemMetrics(1)
+        if x < -50 or y < -50 or x > screen_w or y > screen_h:
+            return
+        config.set("window_x", int(x))
+        config.set("window_y", int(y))
+        config.set("window_width", int(w))
+        config.set("window_height", int(h))
+        log.info(f"Window position saved: ({x}, {y}) {w}x{h}")
+    except Exception as e:
+        log.debug(f"Save window position failed: {e}")
+
+
 def _toggle_window():
     """
     切换窗口显示/隐藏（从快捷键调用）
@@ -180,10 +206,12 @@ def _toggle_window():
                     SW_SHOW = 5
                     SWP_NOMOVE = 0x0002
                     SWP_NOSIZE = 0x0001
-                    HWND_TOPMOST = -1
+                    HWND_TOPMOST = ctypes.c_void_p(-1)
+                    HWND_NOTOPMOST = ctypes.c_void_p(-2)
 
                     user32.ShowWindow(hwnd, SW_RESTORE)
                     user32.ShowWindow(hwnd, SW_SHOW)
+                    # 临时置顶（拿前台用），稍后按用户意愿恢复
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
 
                     # 强制窗口置顶 + 前台（多级保障）
@@ -255,8 +283,8 @@ def _toggle_window():
                             user32_ = ctypes.windll.user32
                             SWP_NOMOVE = 0x0002
                             SWP_NOSIZE = 0x0001
-                            HWND_TOPMOST = -1
-                            user32_.SetWindowPos(hwnd2, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                            # 临时置顶拿前台
+                            user32_.SetWindowPos(hwnd2, ctypes.c_void_p(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
                             # 延迟置顶后再尝试一次前台
                             fg2 = user32_.GetForegroundWindow()
                             fg2_tid = user32_.GetWindowThreadProcessId(fg2, None)
@@ -266,6 +294,9 @@ def _toggle_window():
                             user32_.SetForegroundWindow(hwnd2)
                             if fg2_tid != t2_tid:
                                 user32_.AttachThreadInput(t2_tid, fg2_tid, False)
+                            # 按用户意愿恢复置顶（未开启则取消，避免复选框恒勾选）
+                            if not bool(config.get("window_on_top", False)):
+                                user32_.SetWindowPos(hwnd2, ctypes.c_void_p(-2), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
                             log.info(f"Window re-topmost (hwnd={hwnd2:#x})")
                         except Exception:
                             pass
@@ -278,6 +309,9 @@ def _toggle_window():
         else:
             # ---- 隐藏窗口 ----
             log.info("Toggle: hiding window to tray...")
+            
+            # 保存窗口位置（下次启动恢复）
+            _save_window_position(window)
             
             minimize_to_tray = config.get("minimize_to_tray", True)
             if minimize_to_tray:
@@ -302,8 +336,8 @@ def _toggle_window():
 
 def _show_window():
     """
-    显示窗口（从托盘调用）
-    直接操作 pywebview 窗口
+    显示窗口（从托盘左键/菜单调用）
+    强制前台+置顶（与热键唤起一致），确保在第三方 Dock 环境下也能可靠唤起
     """
     global _window_visible
     try:
@@ -316,9 +350,95 @@ def _show_window():
         window.show()
         window.restore()
         _window_visible = True
+        _force_window_foreground()
         log.info("Window shown and restored")
     except Exception as e:
         log.error(f"Show window error: {e}")
+
+
+def _force_window_foreground():
+    """强制主窗口置顶+前台（Alt 解锁 + AttachThreadInput + 验证重试）
+
+    注意：置顶是【临时】的——拿完前台后按用户意愿（config.window_on_top）恢复，
+    否则每次唤起窗口都会永久置顶，导致托盘菜单"窗口置顶"复选框永远勾选。
+    """
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = _find_window_hwnd()
+        if not hwnd:
+            return
+        SW_RESTORE = 9
+        SW_SHOW = 5
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        HWND_TOPMOST = ctypes.c_void_p(-1)  # 64 位指针值
+        HWND_NOTOPMOST = ctypes.c_void_p(-2)
+
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_SHOW)
+        # 临时置顶，确保拿到前台
+        user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+
+        # 强制前台（多级保障）：Alt 键击解锁 + attach 当前线程
+        import threading
+        kernel32 = ctypes.windll.kernel32
+        try:
+            # 1) Alt 键击解锁（模拟"最近有输入"）
+            user32.keybd_event(0x12, 0, 0, 0)
+            user32.keybd_event(0x12, 0, 0x0002, 0)
+            # 2) AttachThreadInput 当前调用线程与前台线程
+            fg = user32.GetForegroundWindow()
+            fg_tid = user32.GetWindowThreadProcessId(fg, None)
+            my_tid = kernel32.GetCurrentThreadId()
+            attached = False
+            if fg and fg_tid != my_tid and fg_tid != 0:
+                attached = user32.AttachThreadInput(my_tid, fg_tid, True)
+            # 3) 设置前台
+            ok = user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+            if attached:
+                user32.AttachThreadInput(my_tid, fg_tid, False)
+            # 4) 验证，失败重试一次
+            if not ok or user32.GetForegroundWindow() != hwnd:
+                user32.keybd_event(0x12, 0, 0, 0)
+                user32.keybd_event(0x12, 0, 0x0002, 0)
+                user32.SetForegroundWindow(hwnd)
+                user32.BringWindowToTop(hwnd)
+        except Exception as e:
+            log.debug(f"Foreground set failed: {e}")
+            user32.BringWindowToTop(hwnd)
+
+        # 按用户意愿恢复置顶状态（未开启置顶则取消 topmost，避免复选框恒勾选）
+        try:
+            want_top = bool(config.get("window_on_top", False))
+            if not want_top:
+                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+        except Exception as e:
+            log.debug(f"Restore topmost failed: {e}")
+
+        # 延迟 0.3s 补一次前台（窗口完全显示后）
+        try:
+            def _re_topmost():
+                try:
+                    user32_ = ctypes.windll.user32
+                    SWP_NOMOVE = 0x0002
+                    SWP_NOSIZE = 0x0001
+                    # 临时置顶拿前台
+                    user32_.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                    user32_.SetForegroundWindow(hwnd)
+                    # 按用户意愿恢复
+                    if not bool(config.get("window_on_top", False)):
+                        user32_.SetWindowPos(hwnd, ctypes.c_void_p(-2), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                    log.info(f"Window re-topmost (hwnd={hwnd:#x})")
+                except Exception:
+                    pass
+            threading.Timer(0.3, _re_topmost).start()
+        except Exception:
+            pass
+        log.info(f"Window forced to front (hwnd={hwnd:#x})")
+    except Exception as e:
+        log.debug(f"Win32 show failed: {e}")
 
 
 def _quit_app():
@@ -328,6 +448,14 @@ def _quit_app():
     global _real_quit
     log.info("Real quit requested from tray")
     _real_quit = True
+    
+    # 保存窗口位置（退出前）
+    try:
+        window = webview.windows[0] if webview.windows else None
+        if window:
+            _save_window_position(window)
+    except Exception:
+        pass
     
     # 先停止托盘和快捷键
     try:
@@ -343,7 +471,7 @@ def _quit_app():
         pass
     
     # 销毁所有窗口（pywebview 需全部窗口关闭后才退出事件循环）
-    # 注意：必须先销毁气泡窗口，否则事件循环永不退出
+    # 注意：必须先销毁气泡和托盘菜单窗口，否则事件循环永不退出
     try:
         from api import api as api_instance
         if api_instance._bubble_window:
@@ -352,6 +480,18 @@ def _quit_app():
                 log.info("Bubble window destroyed")
             except Exception as e:
                 log.warning(f"Bubble destroy failed: {e}")
+        if api_instance._tray_menu_window:
+            try:
+                api_instance._tray_menu_window.destroy()
+                log.info("Tray menu window destroyed")
+            except Exception as e:
+                log.warning(f"Tray menu destroy failed: {e}")
+        if api_instance._tray_tooltip_window:
+            try:
+                api_instance._tray_tooltip_window.destroy()
+                log.info("Tray tooltip window destroyed")
+            except Exception as e:
+                log.warning(f"Tray tooltip destroy failed: {e}")
     except Exception:
         pass
     
@@ -415,6 +555,31 @@ def _setup_hotkey(window):
         log.error(f"Failed to setup hotkeys: {e}", exc_info=True)
 
 
+def _on_tray_right_click(x: int, y: int):
+    """
+    托盘右键点击回调：显示自定义菜单（独立小窗口渲染，风格与应用一致）
+    """
+    try:
+        from api import api as api_instance
+        api_instance.show_tray_menu(x, y)
+        log.info(f"Tray right-click at ({x}, {y}), custom menu requested")
+    except Exception as e:
+        log.error(f"Tray right-click failed: {e}")
+
+
+def _on_tray_hover(x: int, y: int):
+    """
+    托盘图标鼠标悬停回调：显示自定义 tooltip（应用风格小卡片）
+    """
+    try:
+        from api import api as api_instance
+        mode = config.get("selection_display_mode", "bubble")
+        mode_text = "气泡模式" if mode == "bubble" else "窗口模式"
+        api_instance.show_tray_tooltip(x, y, mode_text)
+    except Exception as e:
+        log.debug(f"Tray hover failed: {e}")
+
+
 def _setup_tray(window):
     """设置系统托盘"""
     try:
@@ -423,8 +588,16 @@ def _setup_tray(window):
         if minimize_to_tray:
             tray_manager.start(
                 on_show=_show_window,
-                on_quit=_quit_app
+                on_quit=_quit_app,
+                on_right_click=_on_tray_right_click,
+                on_hover=_on_tray_hover
             )
+            # 设置初始托盘提示（显示当前划词模式）
+            try:
+                from api import api as api_instance
+                api_instance._update_tray_tooltip()
+            except Exception:
+                pass
             log.info("System tray initialized")
         else:
             log.info("System tray disabled by config")
@@ -468,13 +641,19 @@ def main():
     min_width = window_config.get("min_width", 420)
     min_height = window_config.get("min_height", 120)
     
+    # 读取上次保存的窗口位置（优先恢复，否则屏幕外创建等 loaded 后居中）
+    saved_x = config.get("window_x")
+    saved_y = config.get("window_y")
+    saved_w = config.get("window_width")
+    saved_h = config.get("window_height")
+    
     # 创建主窗口 - 使用js_api参数传递API
-    # 屏幕外创建（避免 WebView2 初始化时的白屏/黑屏闪烁），页面加载完成后移到屏幕中央
+    # 屏幕外创建（避免 WebView2 初始化时的白屏/黑屏闪烁），页面加载完成后移到上次位置或屏幕中央
     window = webview.create_window(
         title=APP_NAME,
         url=str(ROOT_DIR / "web" / "index.html"),
-        width=width,
-        height=height,
+        width=saved_w if saved_w else width,
+        height=saved_h if saved_h else height,
         min_size=(min_width, min_height),
         resizable=True,
         frameless=True,
@@ -486,7 +665,7 @@ def main():
         js_api=api
     )
     
-    # 页面加载完成后移到屏幕中央（避免 WebView2 白/黑屏闪烁）
+    # 页面加载完成后移到上次位置或屏幕中央（避免 WebView2 白/黑屏闪烁）
     def _on_main_loaded():
         try:
             import ctypes
@@ -495,12 +674,22 @@ def main():
             screen_h = user32.GetSystemMetrics(1)
             win_w = window.width
             win_h = window.height
-            cx = max(0, (screen_w - win_w) // 2)
-            cy = max(0, (screen_h - win_h) // 2)
-            window.move(cx, cy)
-            log.info(f"Main window moved to center ({cx}, {cy})")
+            
+            # 优先恢复上次保存的位置
+            if saved_x is not None and saved_y is not None:
+                # 确保位置在屏幕内（防止显示器变更后窗口跑到屏幕外）
+                sx = max(0, min(int(saved_x), screen_w - 100))
+                sy = max(0, min(int(saved_y), screen_h - 100))
+                window.move(sx, sy)
+                log.info(f"Main window restored to ({sx}, {sy})")
+            else:
+                # 无保存位置：屏幕居中
+                cx = max(0, (screen_w - win_w) // 2)
+                cy = max(0, (screen_h - win_h) // 2)
+                window.move(cx, cy)
+                log.info(f"Main window moved to center ({cx}, {cy})")
         except Exception as e:
-            log.debug(f"Center window failed: {e}")
+            log.debug(f"Position window failed: {e}")
     window.events.loaded += _on_main_loaded
     
     # 设置窗口引用
@@ -546,6 +735,88 @@ def main():
     except Exception as e:
         log.warning(f"Failed to create bubble window: {e}")
     
+    # 创建自定义托盘菜单窗口（独立小窗口：主窗口隐藏到托盘时菜单仍可见）
+    # 注意：与气泡相同——不用 hidden=True（WebView2 不渲染），屏幕外创建；min_size=(1,1) 防钳制
+    try:
+        tray_menu_win = webview.create_window(
+            title="QingxinTrayMenu",
+            url=str(ROOT_DIR / "web" / "tray_menu.html") + "?v=1",  # 版本号强制刷新 WebView2 缓存
+            width=210,
+            height=400,  # 初始高度留足余量（菜单全部项约 350px，防 JS 测量前内容被裁）
+            min_size=(1, 1),
+            frameless=True,
+            on_top=True,
+            draggable=False,
+            easy_drag=False,
+            text_select=False,
+            x=-10000,
+            y=-10000,
+            background_color="#FFFFFF",
+            js_api=api
+        )
+        api.set_tray_menu_window(tray_menu_win)
+        # 创建后立即隐藏（Win32）：避免启动时窗口闪现/出现在任务栏
+        try:
+            api.hide_tray_menu()
+        except Exception:
+            pass
+        
+        # 菜单窗口禁止关闭，只能隐藏（避免引用失效）；退出时允许关闭
+        def _on_tray_menu_closing():
+            global _real_quit
+            if _real_quit:
+                log.info("Tray menu closing allowed (real quit)")
+                return True
+            log.info("Tray menu closing requested, hiding instead")
+            try:
+                tray_menu_win.hide()
+            except Exception:
+                pass
+            return False
+        tray_menu_win.events.closing += _on_tray_menu_closing
+        log.info("Tray menu window created (hidden)")
+    except Exception as e:
+        log.warning(f"Failed to create tray menu window: {e}")
+    
+    # 创建自定义托盘 tooltip 窗口（应用风格小卡片，替代 Windows 原生气泡）
+    try:
+        tooltip_win = webview.create_window(
+            title="QingxinTooltip",
+            url=str(ROOT_DIR / "web" / "tray_tooltip.html") + "?v=1",
+            width=160,
+            height=32,
+            min_size=(1, 1),
+            frameless=True,
+            on_top=True,
+            draggable=False,
+            easy_drag=False,
+            text_select=False,
+            x=-10000,
+            y=-10000,
+            background_color="#FFFFFF",
+            js_api=api
+        )
+        api.set_tray_tooltip_window(tooltip_win)
+        # 创建后立即隐藏（Win32）：避免启动时窗口闪现/出现在任务栏
+        try:
+            api.hide_tray_tooltip()
+        except Exception:
+            pass
+        
+        def _on_tooltip_closing():
+            global _real_quit
+            if _real_quit:
+                return True
+            try:
+                tooltip_win.hide()
+            except Exception:
+                pass
+            return False
+        tooltip_win.events.closing += _on_tooltip_closing
+        log.info("Tray tooltip window created (hidden)")
+    except Exception as e:
+        log.warning(f"Failed to create tray tooltip window: {e}")
+    
     # 注册窗口关闭事件（处理 Alt+F4 等 OS 级关闭）
     window.events.closing += _on_closing
     
@@ -553,10 +824,12 @@ def main():
     def on_started():
         log.info("pywebview started, initializing components...")
         
-        # 启动后立即隐藏气泡窗口（它在屏幕外，但可能闪现/出现在任务栏）
+        # 启动后立即隐藏辅助窗口（它们在屏幕外，但可能闪现/出现在任务栏）
         try:
             from api import api as api_instance
             api_instance.hide_bubble()
+            api_instance.hide_tray_tooltip()
+            api_instance.hide_tray_menu()
         except Exception:
             pass
         
@@ -564,10 +837,12 @@ def main():
         import time
         time.sleep(1.0)
         
-        # 再次确保气泡隐藏（WebView2 完全就绪后）
+        # 再次确保辅助窗口隐藏（WebView2 完全就绪后）
         try:
             from api import api as api_instance
             api_instance.hide_bubble()
+            api_instance.hide_tray_tooltip()
+            api_instance.hide_tray_menu()
         except Exception:
             pass
         
@@ -591,4 +866,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # 关键：把 __main__ 注册为 'main' 模块别名。
+    # api.py 中 `import main as main_module` 依赖此别名拿到同一个模块对象；
+    # 否则 main.py 会被二次加载（两个模块实例），_real_quit 等全局变量分裂，
+    # 导致托盘退出时 closing 回调读到的 _real_quit 永远是 False、窗口无法关闭。
+    sys.modules['main'] = sys.modules['__main__']
     main()

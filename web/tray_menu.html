@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QingxinTrayMenu</title>
+    <link rel="stylesheet" href="styles/main.css">
+    <style>
+        /* 托盘菜单窗口：无标题栏白卡片，复用 main.css 的 .tray-menu 样式 */
+        html, body {
+            background: transparent;
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
+        #tray-menu {
+            position: static;
+            min-width: 190px;
+            width: max-content;
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="tray-menu" class="tray-menu">
+        <div class="tray-menu-header">
+            <span class="tray-menu-title">青欣翻译</span>
+        </div>
+        <div class="tray-menu-group">
+            <div class="tray-menu-item" data-action="show">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                </svg>
+                <span>显示窗口</span>
+            </div>
+            <div class="tray-menu-item" data-action="hide">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/>
+                    <line x1="1" y1="1" x2="23" y2="23"/>
+                </svg>
+                <span>隐藏窗口</span>
+            </div>
+        </div>
+        <div class="tray-menu-sep"></div>
+        <div class="tray-menu-group">
+            <div class="tray-menu-label">划词模式</div>
+            <div class="tray-menu-item tray-menu-sub" data-action="mode-bubble">
+                <span class="tray-menu-radio" id="tray-mode-bubble"></span>
+                <span>气泡</span>
+            </div>
+            <div class="tray-menu-item tray-menu-sub" data-action="mode-window">
+                <span class="tray-menu-radio" id="tray-mode-window"></span>
+                <span>窗口</span>
+            </div>
+            <div class="tray-menu-item tray-menu-sub" data-action="on-top">
+                <span class="tray-menu-check" id="tray-check-on-top"></span>
+                <span>窗口置顶</span>
+            </div>
+            <div class="tray-menu-item tray-menu-sub" data-action="startup">
+                <span class="tray-menu-check" id="tray-check-startup"></span>
+                <span>开机自启</span>
+            </div>
+        </div>
+        <div class="tray-menu-sep"></div>
+        <div class="tray-menu-group">
+            <div class="tray-menu-item" data-action="clear-history">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                </svg>
+                <span>清空历史记录</span>
+            </div>
+        </div>
+        <div class="tray-menu-sep"></div>
+        <div class="tray-menu-group">
+            <div class="tray-menu-item tray-menu-quit" data-action="quit">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <path d="M18.36 6.64a9 9 0 11-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+                </svg>
+                <span>退出</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ========== 托盘菜单窗口脚本 ==========
+
+        // 由 Python 端调用：显示菜单并刷新状态
+        window.__showTrayMenu = async function(x, y) {
+            // 刷新状态（置顶、自启、划词模式）
+            try {
+                if (!window.pywebview || !window.pywebview.api) return;
+                const state = await window.pywebview.api.tray_get_state();
+                if (state) {
+                    document.getElementById('tray-mode-bubble').classList.toggle('checked', state.display_mode !== 'window');
+                    document.getElementById('tray-mode-window').classList.toggle('checked', state.display_mode === 'window');
+                    document.getElementById('tray-check-on-top').classList.toggle('checked', !!state.on_top);
+                    document.getElementById('tray-check-startup').classList.toggle('checked', !!state.startup);
+                }
+                // 显示前重新测量尺寸（字体加载/状态变化可能影响高度）
+                window.__fitTrayMenu();
+            } catch (e) {}
+        };
+
+        // 由 Python 端调用：重新测量菜单尺寸（内容固定，通常只需一次）
+        // 注意用 scrollHeight/scrollWidth：不受 CSS 缩放动画(scale)影响，测量更准确
+        window.__fitTrayMenu = function() {
+            try {
+                if (!window.pywebview || !window.pywebview.api) return;
+                const menu = document.getElementById('tray-menu');
+                const w = Math.ceil(menu.scrollWidth) + 2;
+                const h = Math.ceil(menu.scrollHeight) + 2;
+                window.pywebview.api.resize_tray_menu(w, h);
+            } catch (e) {}
+        };
+
+        // 菜单项点击处理
+        // 注意：先执行动作、最后再隐藏窗口！
+        // 若先隐藏，WebView2 窗口隐藏后可能暂停 JS 执行，后续动作（如退出）永远不执行
+        document.getElementById('tray-menu').addEventListener('click', function(e) {
+            const item = e.target.closest('[data-action]');
+            if (!item) return;
+            const action = item.dataset.action;
+            if (!window.pywebview || !window.pywebview.api) return;
+            const api = window.pywebview.api;
+
+            switch (action) {
+                case 'show':
+                    api.show_window_from_tray();
+                    break;
+                case 'hide':
+                    api.tray_hide_window();
+                    break;
+                case 'mode-bubble':
+                    api.save_settings({ selection_display_mode: 'bubble' });
+                    break;
+                case 'mode-window':
+                    api.save_settings({ selection_display_mode: 'window' });
+                    break;
+                case 'on-top':
+                    // 原子操作：Python 端读取当前状态→取反→置顶→同步主窗口图钉
+                    api.tray_toggle_on_top();
+                    break;
+                case 'startup':
+                    api.tray_toggle_startup();
+                    break;
+                case 'clear-history':
+                    api.clear_history();
+                    break;
+                case 'quit':
+                    api.tray_quit();
+                    break;
+            }
+            // 动作已发起，最后隐藏菜单
+            try { api.hide_tray_menu(); } catch (err) {}
+        });
+
+        // 窗口失焦时自动隐藏菜单（点击窗口外任意位置）
+        window.addEventListener('blur', function() {
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.hide_tray_menu();
+                }
+            } catch (e) {}
+        });
+
+        // Esc 关闭菜单
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                try {
+                    if (window.pywebview && window.pywebview.api) {
+                        window.pywebview.api.hide_tray_menu();
+                    }
+                } catch (err) {}
+            }
+        });
+
+        // 加载完成后自适应尺寸
+        window.addEventListener('DOMContentLoaded', function() {
+            window.__fitTrayMenu();
+        });
+        if (document.readyState !== 'loading') {
+            window.__fitTrayMenu();
+        }
+    </script>
+</body>
+</html>

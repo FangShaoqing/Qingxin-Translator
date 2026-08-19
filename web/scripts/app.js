@@ -906,6 +906,13 @@ function togglePin() {
     callApi('set_on_top', isPinned);
 }
 
+// 由后端调用：同步图钉按钮状态（托盘切换置顶时）
+window.__setPinnedState = function(pinned) {
+    if (!elements.pinBtn) return;
+    elements.pinBtn.classList.toggle('pinned', !!pinned);
+    elements.pinBtn.title = pinned ? '取消钉住' : '钉住窗口';
+};
+
 // 事件绑定
 function bindEvents() {
     // 导航按钮

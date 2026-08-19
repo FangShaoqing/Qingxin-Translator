@@ -3,7 +3,7 @@
 
 #define MyAppName "青欣翻译"
 #define MyAppNameEn "Qingxin Translator"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.2"
 #define MyAppPublisher "Qingxin"
 #define MyAppExeName "QingxinTranslator.exe"
 

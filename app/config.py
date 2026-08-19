@@ -39,6 +39,13 @@ DEFAULT_CONFIG = {
     "font_size": 14,
     "font_family": "Source Han Sans",
     
+    # 窗口位置（None = 使用屏幕居中）
+    "window_x": None,            # 上次窗口 X 坐标
+    "window_y": None,            # 上次窗口 Y 坐标
+    "window_width": 520,         # 上次窗口宽度
+    "window_height": 200,        # 上次窗口高度
+    "window_on_top": False,      # 窗口置顶（用户意愿，托盘菜单/图钉切换）
+    
     # 快捷键
     "hotkey": "Ctrl+Alt+S",
     
@@ -79,7 +86,7 @@ class Config:
         self._initialized = True
     
     def load(self) -> None:
-        """从文件加载配置，优先读取用户目录，否则加载预置配置"""
+        """从文件加载配置，优先读取用户目录，否则复制预置配置"""
         if self.config_path.exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
@@ -89,16 +96,23 @@ class Config:
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Warning: Failed to load config: {e}")
         else:
-            # 用户配置不存在，尝试加载预置配置（exe 旁边的 data/config.json）
-            preset_config = _EXE_DIR / "data" / "config.json"
-            if preset_config.exists() and preset_config != self.config_path:
-                try:
-                    with open(preset_config, "r", encoding="utf-8") as f:
+            # 用户配置不存在：从安装目录的预置配置复制到用户目录
+            # （避免安装到 Program Files 后直接读写无权限的 {app}\data）
+            try:
+                from app.constants import PRESET_CONFIG_FILE
+                if PRESET_CONFIG_FILE.exists() and PRESET_CONFIG_FILE != self.config_path:
+                    with open(PRESET_CONFIG_FILE, "r", encoding="utf-8") as f:
                         saved_config = json.load(f)
                         self.data.update(saved_config)
-                        print(f"Loaded preset config from: {preset_config}")
-                except (json.JSONDecodeError, IOError):
-                    pass
+                        print(f"Loaded preset config from: {PRESET_CONFIG_FILE}")
+                    # 复制到用户目录，确保后续保存可写
+                    try:
+                        self.save()
+                        print(f"Preset config copied to: {self.config_path}")
+                    except Exception:
+                        pass
+            except (json.JSONDecodeError, IOError, ImportError):
+                pass
         
         # 纠正无效的 engine 值
         valid_engines = {"online"}

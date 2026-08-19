@@ -17,17 +17,17 @@
             font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        /* 细边框小卡片气泡：无标题栏、无原文，仅译文 */
+        /* 细边框小卡片气泡：无标题栏、无原文，仅译文。
+           卡片占满整个窗口；窗口四角由 Python 端 SetWindowRgn 裁剪成圆角（真正透明），
+           与托盘 tooltip 一致——只留卡片，无窗口背景块 */
         .bubble {
-            width: calc(100vw - 8px);
-            height: calc(100vh - 8px);
-            margin: 4px;  /* 留出阴影空间，避免被窗口裁剪 */
+            width: 100vw;
+            height: 100vh;
             display: flex;
             align-items: center;
             background: #FFFFFF;
             border: 1px solid #F0C4C8;
             border-radius: 10px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12), 0 1px 4px rgba(240, 196, 200, 0.5);
             padding: 6px 10px;
             user-select: text;
             -webkit-user-select: text;
@@ -87,15 +87,15 @@
                 ctx.font = '13px "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif';
                 const textWidth = ctx.measureText(translation.textContent).width;
                 
-                // 气泡宽度 = 文本宽度 + padding(20) + 边框(2) + margin(8)，限制 120~400
-                const width = Math.max(120, Math.min(Math.ceil(textWidth) + 30, 400));
+                // 气泡宽度 = 文本宽度 + padding(20) + 边框(2)，限制 120~400
+                const width = Math.max(120, Math.min(Math.ceil(textWidth) + 24, 400));
                 
                 // 按目标宽度设置内容宽度，测量实际换行后的高度
-                const contentWidth = width - 8 - 2 - 20;  // margin + border + padding
+                const contentWidth = width - 2 - 20;  // border + padding
                 translation.style.width = contentWidth + 'px';
                 const transH = translation.scrollHeight;
-                // 高度 = 译文 + padding(12) + 边框(2) + margin(8)
-                const height = Math.max(42, Math.min(transH + 22, 268));
+                // 高度 = 译文 + padding(12) + 边框(2)
+                const height = Math.max(42, Math.min(transH + 18, 268));
                 
                 window.pywebview.api.resize_bubble(width, Math.round(height));
             } catch (e) {}

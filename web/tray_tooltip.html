@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QingxinTooltip</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            background: transparent;
+            overflow: hidden;
+            font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        /* 与应用整体风格一致的小卡片 tooltip */
+        /* 卡片占满整个窗口；窗口四角由 Python 端 SetWindowRgn 裁剪成圆角（真正透明） */
+        .tooltip {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            background: #FFFFFF;
+            border: 1px solid #F0C4C8;
+            border-radius: 8px;
+            padding: 3px 8px;
+            user-select: none;
+            animation: tooltipIn 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        @keyframes tooltipIn {
+            from { opacity: 0; transform: scale(0.95) translateY(-2px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        .tooltip-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--dot, #F0C4C8);
+            flex-shrink: 0;
+        }
+
+        #tooltip-text {
+            font-size: 11px;
+            color: #333333;
+            line-height: 1.3;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="tooltip">
+        <span class="tooltip-dot"></span>
+        <span id="tooltip-text">青欣翻译</span>
+    </div>
+
+    <script>
+        // 由 Python 端调用：设置 tooltip 文字并自适应宽度
+        window.__setTooltip = function(text) {
+            const el = document.getElementById('tooltip-text');
+            if (text) el.textContent = text;
+            fitTooltip();
+        };
+
+        // 根据文字长度自适应窗口宽度（保持高度固定）
+        function fitTooltip() {
+            try {
+                if (!window.pywebview || !window.pywebview.api) return;
+                const text = document.getElementById('tooltip-text');
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.font = '11px "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+                const textWidth = ctx.measureText(text.textContent).width;
+                // 宽度 = 文字 + 圆点(5) + 间距(4) + padding(16) + 边框(2)，最小 72（贴内容）
+                const width = Math.max(72, Math.ceil(textWidth) + 27);
+                window.pywebview.api.resize_tray_tooltip(width, 32);
+            } catch (e) {}
+        }
+
+        window.addEventListener('DOMContentLoaded', function() { fitTooltip(); });
+        if (document.readyState !== 'loading') {
+            fitTooltip();
+        }
+
+        // tooltip 仅作展示：点击任意处立即隐藏，不响应任何交互
+        document.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.hide_tray_tooltip();
+                }
+            } catch (err) {}
+        });
+        document.addEventListener('click', function(e) {
+            e.preventDefault();
+        });
+        document.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+        });
+        document.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+        });
+    </script>
+</body>
+</html>

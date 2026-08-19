@@ -3,13 +3,14 @@ Qingxin Translator - Constants
 应用常量定义
 """
 
+import os
 import sys
 from pathlib import Path
 
 # ==================== 路径常量 ====================
 APP_NAME = "Qingxin Translator"
 APP_NAME_CN = "青欣翻译"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.2"
 
 # 区分打包环境与开发环境
 # 打包后：sys._MEIPASS 指向临时解压目录（只读资源在这里）
@@ -17,19 +18,25 @@ APP_VERSION = "0.1.0"
 if getattr(sys, 'frozen', False):
     # PyInstaller --onefile 打包后的临时解压目录（只读）
     _BUNDLE_DIR = Path(sys._MEIPASS)
-    # exe 所在目录（可写数据放在 exe 旁边）
+    # exe 所在目录（安装目录，Program Files 下无写权限，仅作只读资源来源）
     _EXE_DIR = Path(sys.executable).parent
+    # 用户数据目录（%APPDATA% 可写，避免安装到 Program Files 后配置保存失败）
+    _DATA_BASE = Path(os.environ.get('APPDATA', str(Path.home()))) / "Qingxin Translator"
 else:
     _BUNDLE_DIR = Path(__file__).parent.parent
     _EXE_DIR = Path(__file__).parent.parent
+    _DATA_BASE = _EXE_DIR
 
 # 项目根目录（兼容旧代码引用）
 ROOT_DIR = _BUNDLE_DIR
 
-# 数据目录（可写，放在 exe 旁边，不会随临时目录清理丢失）
-DATA_DIR = _EXE_DIR / "data"
+# 数据目录（可写：打包后为 %APPDATA%\Qingxin Translator\data，开发时为项目目录）
+DATA_DIR = _DATA_BASE / "data"
 CONFIG_FILE = DATA_DIR / "config.json"
 DATABASE_FILE = DATA_DIR / "history.db"
+
+# 预置配置目录（打包后为安装目录 data，仅首次启动作种子）
+PRESET_CONFIG_FILE = _EXE_DIR / "data" / "config.json"
 
 # 资源目录（只读，打包在 exe 内部）
 RESOURCES_DIR = _BUNDLE_DIR / "resources"

@@ -109,6 +109,13 @@ body {
     background: transparent;
     cursor: pointer;
     transition: all var(--transition-fast);
+    outline: none;          /* 移除焦点黑框（窗口唤起后按钮聚焦时的默认 outline） */
+    -webkit-tap-highlight-color: transparent;
+}
+
+.window-btn:focus {
+    outline: none;
+    box-shadow: none;
 }
 
 .window-btn:hover {
@@ -1104,4 +1111,151 @@ input:checked + .slider:before {
 
 .modal-btn-confirm:active {
     transform: translateY(0);
+}
+
+/* ==================== 自定义托盘菜单 ==================== */
+.tray-menu {
+    position: fixed;
+    min-width: 190px;
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    padding: 6px;
+    z-index: 4000;
+    animation: trayMenuIn 0.15s ease;
+    user-select: none;
+}
+
+.tray-menu.hidden {
+    display: none;
+}
+
+@keyframes trayMenuIn {
+    from { opacity: 0; transform: scale(0.95) translateY(-4px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.tray-menu-header {
+    padding: 6px 12px 8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+}
+
+.tray-menu-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pink-dark);
+    letter-spacing: 1px;
+}
+
+.tray-menu-group {
+    padding: 2px 0;
+}
+
+.tray-menu-label {
+    padding: 4px 12px;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 1px;
+}
+
+.tray-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    white-space: nowrap;
+}
+
+.tray-menu-item:hover {
+    background: var(--pink-light);
+    color: var(--text-primary);
+}
+
+.tray-menu-item:active {
+    transform: scale(0.98);
+}
+
+.tray-menu-item svg {
+    width: 14px;
+    height: 14px;
+    color: var(--text-tertiary);
+    flex-shrink: 0;
+}
+
+.tray-menu-item:hover svg {
+    color: var(--pink-dark);
+}
+
+.tray-menu-sub {
+    padding-left: 20px;
+}
+
+.tray-menu-radio,
+.tray-menu-check {
+    width: 14px;
+    height: 14px;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 50%;
+    flex-shrink: 0;
+    position: relative;
+    transition: all var(--transition-fast);
+}
+
+.tray-menu-check {
+    border-radius: 3px;
+}
+
+.tray-menu-radio.checked {
+    border-color: var(--pink-dark);
+}
+
+.tray-menu-radio.checked::after {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: var(--pink-dark);
+}
+
+.tray-menu-check.checked {
+    background: var(--pink-dark);
+    border-color: var(--pink-dark);
+}
+
+.tray-menu-check.checked::after {
+    content: '✓';
+    position: absolute;
+    inset: -1px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.tray-menu-sep {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 8px;
+}
+
+.tray-menu-quit {
+    color: #d9534f;
+}
+
+.tray-menu-quit:hover {
+    background: rgba(217, 83, 79, 0.08);
+    color: #d9534f;
+}
+
+.tray-menu-quit svg {
+    color: #d9534f;
 }

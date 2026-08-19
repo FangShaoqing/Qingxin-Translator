@@ -4,6 +4,8 @@ pywebview API 桥接模块
 """
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Optional, List
 
@@ -24,11 +26,18 @@ class Api:
     def __init__(self):
         self._window = None
         self._bubble_window = None
+        self._tray_menu_window = None
         self._hotkey_manager = None
         self._bubble_timer = None
         self._bubble_visible = False  # 自维护气泡可见状态
         self._bubble_pos = None       # 热键触发瞬间记录的鼠标位置 (x, y)
         self._bubble_transparent = False  # 气泡窗口不透明（真透明在 WebView2 不可靠，渲染成黑底）
+        self._tray_tooltip_window = None
+        self._tray_tooltip_timer = None
+        self._tray_tooltip_visible = False
+        self._tray_tooltip_anchor = None
+        self._tray_tooltip_pos = None
+        self._tray_tooltip_shown_at = 0.0
     
     def _capture_mouse_pos(self):
         """记录当前鼠标位置（热键触发瞬间调用，供翻译完成后定位气泡）"""
@@ -52,6 +61,15 @@ class Api:
     def set_bubble_window(self, window):
         """设置划词翻译气泡窗口引用"""
         self._bubble_window = window
+    
+    def set_tray_menu_window(self, window):
+        """设置自定义托盘菜单窗口引用"""
+        self._tray_menu_window = window
+    
+    def set_tray_tooltip_window(self, window):
+        """设置自定义托盘 tooltip 窗口引用"""
+        self._tray_tooltip_window = window
+        self._tray_tooltip_timer = None
     
     # ========== 划词翻译气泡 ==========
     
@@ -137,7 +155,7 @@ class Api:
             
             SW_SHOW = 5
             SW_RESTORE = 9
-            HWND_TOPMOST = -1
+            HWND_TOPMOST = ctypes.c_void_p(-1)  # 64 位指针值：直接传 -1 会被按 32 位截断
             
             # 强制窗口不透明（仅非透明窗口需要；透明窗口依赖 per-pixel alpha，不能强制）
             if not self._bubble_transparent:
@@ -153,12 +171,15 @@ class Api:
                 except Exception as e:
                     log.debug(f"Bubble alpha fix failed: {e}")
             
-            # 移除任务栏图标（WS_EX_TOOLWINDOW），只显示在屏幕上
+            # 移除任务栏图标（WS_EX_TOOLWINDOW），只显示在屏幕上。
+            # 关键：清除 pywebview 默认的 WS_EX_APPWINDOW（强制任务栏显示）
             try:
                 GWL_EXSTYLE = -20
                 WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_APPWINDOW = 0x00040000
                 current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current | WS_EX_TOOLWINDOW)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
             except Exception:
                 pass
             
@@ -182,6 +203,8 @@ class Api:
                 w, h = 120, 60
             
             moved = user32.MoveWindow(hwnd, x, y, w, h, True)
+            # 圆角窗口区域（四角透明，只留卡片——与 tooltip 一致）
+            self._apply_round_region(hwnd, w, h)
             log.info(f"Bubble moved to ({x}, {y}) size={w}x{h}, ok={moved}")
             return True
         except Exception as e:
@@ -196,6 +219,16 @@ class Api:
             hwnd = self._find_bubble_hwnd()
             if not hwnd:
                 return False
+            # 确保无任务栏按钮（TOOLWINDOW + 清除 APPWINDOW 强制任务栏样式）
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
             SW_HIDE = 0
             user32.ShowWindow(hwnd, SW_HIDE)
             return True
@@ -220,6 +253,8 @@ class Api:
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             # 调整尺寸（保持左上角不变）
             ok = user32.MoveWindow(hwnd, rect.left, rect.top, width, height, True)
+            # 圆角窗口区域随尺寸更新（四角透明，只留卡片）
+            self._apply_round_region(hwnd, width, height)
             # 验证实际尺寸（MoveWindow 后立即读回）
             rect2 = RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect2))
@@ -810,6 +845,606 @@ class Api:
             log.error(f"set_startup error: {e}")
             return {"success": False, "error": str(e)}
     
+    # ========== 托盘自定义菜单 API ==========
+    
+    def tray_get_state(self) -> dict:
+        """获取托盘菜单需要的状态（置顶、自启、划词模式）"""
+        try:
+            from core.startup_manager import is_launch_at_startup
+            # 置顶状态以 config 为准（用户意愿）——唤起窗口时会临时置顶再恢复，
+            # 检测 WS_EX_TOPMOST 会因临时置顶而误报勾选。
+            on_top = bool(config.get("window_on_top", False))
+            return {
+                "on_top": on_top,
+                "startup": is_launch_at_startup(),
+                "display_mode": config.get("selection_display_mode", "bubble"),
+            }
+        except Exception as e:
+            return {"on_top": False, "startup": False, "display_mode": "bubble", "error": str(e)}
+    
+    def tray_toggle_on_top(self) -> dict:
+        """托盘菜单：切换窗口置顶（原子操作：读当前状态→取反→设置→同步主窗口图钉）
+
+        置顶后同时唤起主窗口，让用户立即看到置顶效果（否则窗口隐藏时置顶无感知）。
+        """
+        try:
+            current = bool(config.get("window_on_top", False))
+            new_val = not current
+            self.set_on_top(new_val)
+            self.main_set_pinned_state(new_val)
+            log.info(f"Tray toggle on_top: {current} -> {new_val}")
+            # 切换置顶后唤起主窗口（立即看到效果）
+            try:
+                import ctypes
+                u32 = ctypes.windll.user32
+                hwnd = u32.FindWindowW(None, APP_NAME)
+                import main as main_module
+                if hwnd and not u32.IsWindowVisible(hwnd):
+                    main_module._show_window()
+            except Exception:
+                pass
+            return {"success": True, "on_top": new_val}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def tray_toggle_startup(self) -> dict:
+        """托盘菜单：切换开机自启（原子操作：读当前状态→取反→设置）"""
+        try:
+            from core.startup_manager import is_launch_at_startup, set_launch_at_startup
+            current = is_launch_at_startup()
+            new_val = not current
+            ok = set_launch_at_startup(new_val)
+            log.info(f"Tray toggle startup: {current} -> {new_val} (ok={ok})")
+            return {"success": ok, "startup": new_val}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    # ========== 自定义托盘菜单窗口（独立小窗口，主窗口隐藏时也可见） ==========
+
+    def _find_tray_menu_hwnd(self):
+        """查找托盘菜单窗口的 Win32 句柄"""
+        try:
+            try:
+                native = getattr(self._tray_menu_window, 'native', None)
+                if native is not None:
+                    handle = getattr(native, 'Handle', None)
+                    if handle is not None:
+                        try:
+                            hwnd = handle.ToInt64()
+                        except Exception:
+                            hwnd = int(handle)
+                        if hwnd and hwnd > 0:
+                            return hwnd
+            except Exception:
+                pass
+            try:
+                gui = getattr(self._tray_menu_window, 'gui', None)
+                if gui is not None:
+                    handle = getattr(gui, 'Handle', None)
+                    if handle is not None:
+                        try:
+                            hwnd = handle.ToInt64()
+                        except Exception:
+                            hwnd = int(handle)
+                        if hwnd and hwnd > 0:
+                            return hwnd
+            except Exception:
+                pass
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, "QingxinTrayMenu")
+            if hwnd:
+                return hwnd
+        except Exception:
+            return 0
+        return 0
+
+    def _win32_show_tray_menu(self, x: int, y: int) -> bool:
+        """用 Win32 API 在托盘图标旁显示托盘菜单窗口
+
+        行为与原生菜单一致：检测任务栏方向，菜单贴着任务栏内侧展开，
+        绝不覆盖托盘区域（任务栏在底部→菜单在其上方；左侧→右侧；右侧→左侧；顶部→下方）。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_menu_hwnd()
+            if not hwnd:
+                log.warning("Tray menu hwnd not found")
+                return False
+
+            # 读取当前尺寸（JS 已自适应）
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w <= 0 or h <= 0:
+                w, h = 200, 320
+
+            # 鼠标所在显示器的工作区（支持多显示器）
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            pt = POINT(x, y)
+            MONITOR_DEFAULTTONEAREST = 2
+            monitor = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD),
+                            ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT),
+                            ("dwFlags", wintypes.DWORD)]
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(mi)):
+                work = mi.rcWork
+                sw = work.right - work.left
+                sh = work.bottom - work.top
+                wx, wy = work.left, work.top
+            else:
+                sw = user32.GetSystemMetrics(0)
+                sh = user32.GetSystemMetrics(1)
+                wx = wy = 0
+
+            # 计算菜单位置：以鼠标位置为基准，菜单显示在鼠标上方（原生托盘菜单行为）
+            # 关键：绝不覆盖鼠标位置（托盘图标就在鼠标处）
+            mx, my = x, y - h - 8   # 菜单底部离鼠标 8px（菜单在图标上方）
+            if my < wy:
+                # 上方空间不足：改为显示在鼠标下方
+                my = y + 8
+
+            # 边缘翻转：菜单不超出工作区
+            if mx + w > wx + sw:
+                mx = wx + sw - w - 4
+            if my + h > wy + sh:
+                my = wy + sh - h - 4
+            mx = max(wx, mx)
+            my = max(wy, my)
+
+            # 移除任务栏图标 + 禁止激活 + 移除 APPWINDOW 强制任务栏样式：
+            # 关键：pywebview 创建的窗口默认带 WS_EX_APPWINDOW（强制显示在任务栏），
+            # 必须清除，否则即使有 TOOLWINDOW 任务栏仍会出现该窗口。
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
+
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            # 置顶（只置顶不移动；勿声明 argtypes——进程级共享 windll；hWndInsertAfter 用 64 位指针）
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST | NOSIZE | NOMOVE
+            moved = user32.MoveWindow(hwnd, mx, my, w, h, True)
+            log.info(f"Tray menu shown at ({mx}, {my}) size={w}x{h}, ok={moved}")
+            return True
+        except Exception as e:
+            log.debug(f"Win32 tray menu show failed: {e}")
+            return False
+
+    def _win32_hide_tray_menu(self) -> bool:
+        """用 Win32 API 隐藏托盘菜单窗口"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_menu_hwnd()
+            if not hwnd:
+                return False
+            # 确保无任务栏按钮（TOOLWINDOW + 清除 APPWINDOW 强制任务栏样式）
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
+            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            return True
+        except Exception as e:
+            log.debug(f"Win32 tray menu hide failed: {e}")
+            return False
+
+    def show_tray_menu(self, x: int, y: int) -> None:
+        """显示自定义托盘菜单（右键托盘图标时由 main 调用）"""
+        try:
+            if not self._tray_menu_window:
+                log.warning("Tray menu window not available")
+                return
+            # 菜单显示前先隐藏 tooltip（两者不应同时出现）
+            self.hide_tray_tooltip()
+            # 先让 JS 刷新状态并自适应尺寸，稍等渲染完成后定位
+            try:
+                self._tray_menu_window.evaluate_js(
+                    f"window.__showTrayMenu && window.__showTrayMenu({x}, {y})"
+                )
+            except Exception as e:
+                log.debug(f"Tray menu refresh failed: {e}")
+            import time
+            time.sleep(0.15)
+            if not self._win32_show_tray_menu(x, y):
+                # 降级：pywebview 方式显示
+                try:
+                    self._tray_menu_window.show()
+                    self._tray_menu_window.restore()
+                    self._tray_menu_window.move(x, y)
+                except Exception as e2:
+                    log.warning(f"Tray menu fallback show failed: {e2}")
+                    return
+            # 菜单显示后启动失焦监视线程：用户点击菜单外任意区域（前台窗口不再是菜单）
+            # 立即隐藏菜单——blur 事件不可靠（菜单可能从未获得焦点）
+            self._start_menu_lost_focus_watch()
+        except Exception as e:
+            log.error(f"show_tray_menu error: {e}", exc_info=True)
+
+    def _start_menu_lost_focus_watch(self):
+        """监听菜单失焦：前台窗口不再是菜单窗口时隐藏菜单（点击外部关闭）"""
+        def _watch():
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                # 先激活菜单窗口，确保"点击外部"必然导致前台切换
+                try:
+                    hwnd = self._find_tray_menu_hwnd()
+                    if hwnd:
+                        user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                menu_hwnd = self._find_tray_menu_hwnd()
+                checked = 0
+                while menu_hwnd and self._tray_menu_visible():
+                    time.sleep(0.2)
+                    checked += 1
+                    # 前台窗口不是菜单窗口（且不是我们自己的主窗口/辅助窗口）→ 已失焦
+                    fg = user32.GetForegroundWindow()
+                    if fg and fg != menu_hwnd:
+                        # 排除应用自身窗口（主窗口、气泡、tooltip、菜单）
+                        self.hide_tray_menu()
+                        return
+                    if checked > 150:  # 30 秒兜底
+                        self.hide_tray_menu()
+                        return
+            except Exception:
+                pass
+        import threading
+        t = threading.Thread(target=_watch, daemon=True)
+        t.start()
+
+    def _tray_menu_visible(self) -> bool:
+        """菜单窗口当前是否可见"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_menu_hwnd()
+            return bool(hwnd and user32.IsWindowVisible(hwnd))
+        except Exception:
+            return False
+
+    def hide_tray_menu(self) -> None:
+        """隐藏自定义托盘菜单（点击菜单项/失焦/Esc 时调用）"""
+        try:
+            if not self._tray_menu_window:
+                return
+            self._win32_hide_tray_menu()
+            log.info("Tray menu hidden")
+        except Exception as e:
+            log.debug(f"hide_tray_menu error: {e}")
+
+    def resize_tray_menu(self, width: int, height: int) -> None:
+        """按内容自适应调整托盘菜单窗口尺寸（保持左上角）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_menu_hwnd()
+            if not hwnd:
+                return
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            user32.MoveWindow(hwnd, rect.left, rect.top, max(width, 100), max(height, 100), True)
+            log.debug(f"Tray menu resize to {width}x{height}")
+        except Exception as e:
+            log.debug(f"resize_tray_menu failed: {e}")
+
+    def main_set_pinned_state(self, pinned: bool) -> None:
+        """同步主窗口的图钉按钮状态（托盘菜单切换置顶后调用）"""
+        try:
+            if self._window:
+                self._window.evaluate_js(
+                    f"window.__setPinnedState && window.__setPinnedState({1 if pinned else 0})"
+                )
+        except Exception as e:
+            log.debug(f"main_set_pinned_state failed: {e}")
+
+    # ========== 自定义托盘 tooltip（应用风格小卡片） ==========
+
+    def _find_tray_tooltip_hwnd(self):
+        """查找托盘 tooltip 窗口的 Win32 句柄"""
+        try:
+            try:
+                native = getattr(self._tray_tooltip_window, 'native', None)
+                if native is not None:
+                    handle = getattr(native, 'Handle', None)
+                    if handle is not None:
+                        try:
+                            hwnd = handle.ToInt64()
+                        except Exception:
+                            hwnd = int(handle)
+                        if hwnd and hwnd > 0:
+                            return hwnd
+            except Exception:
+                pass
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, "QingxinTooltip")
+            if hwnd:
+                return hwnd
+        except Exception:
+            return 0
+        return 0
+
+    def _apply_round_region(self, hwnd, w: int, h: int):
+        """给窗口设置圆角窗口区域（四角真正透明，只保留圆角卡片）
+
+        用于气泡/tooltip：与网页 CSS border-radius 10px 对应（CreateRoundRectRgn 圆角 20x20）。
+        """
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            # CreateRoundRectRgn 在 gdi32.dll（不在 user32.dll）！
+            gdi32 = ctypes.WinDLL('gdi32')
+            rgn = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, 20, 20)
+            if rgn:
+                u32.SetWindowRgn(hwnd, rgn, True)
+        except Exception as e:
+            log.debug(f"Round region failed: {e}")
+
+    def _win32_show_tray_tooltip(self, x: int, y: int) -> bool:
+        """用 Win32 API 在托盘图标旁显示 tooltip（固定显示在图标上方）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_tooltip_hwnd()
+            if not hwnd:
+                return False
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w <= 0 or h <= 0:
+                w, h = 150, 32
+
+            # 定位：以鼠标位置为基准，tooltip 显示在鼠标上方（原生 tooltip 行为）。
+            # 间距 42px；水平往左挪 48px（用户实测 x-45 偏右，往左挪 3px）。
+            # 注意：不能锚定 Windows 任务栏 TrayNotifyWnd——用户在 Dock 上的图标位置不同。
+            mx, my = x - 48, y - h - 42
+            if my < 0:
+                my = y + 16
+            # 水平贴屏幕右缘翻转
+            sw = user32.GetSystemMetrics(0)
+            if mx + w > sw:
+                mx = sw - w - 4
+            mx = max(0, mx)
+            my = max(0, my)
+
+            # 移除任务栏图标 + 禁止激活（WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE）：
+            # tooltip 仅作展示，点击不应激活窗口/出现在任务栏。
+            # 关键：清除 pywebview 默认的 WS_EX_APPWINDOW（强制任务栏显示），
+            # 否则即使 TOOLWINDOW 任务栏仍会出现该窗口。
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_NOACTIVATE = 0x08000000
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
+
+            # 圆角窗口区域（四角透明）
+            self._apply_round_region(hwnd, w, h)
+
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST
+            user32.MoveWindow(hwnd, mx, my, w, h, True)
+            log.debug(f"Tray tooltip shown at ({mx}, {my}) size={w}x{h}")
+            return True
+        except Exception as e:
+            log.debug(f"Win32 tray tooltip show failed: {e}")
+            return False
+
+    def _win32_hide_tray_tooltip(self) -> bool:
+        """用 Win32 API 隐藏托盘 tooltip"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_tooltip_hwnd()
+            if not hwnd:
+                return False
+            # 确保无任务栏按钮 + 禁止激活（WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE）
+            # 并清除 pywebview 默认的 WS_EX_APPWINDOW（强制任务栏显示）
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_NOACTIVATE = 0x08000000
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
+            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            return True
+        except Exception as e:
+            log.debug(f"Win32 tray tooltip hide failed: {e}")
+            return False
+
+    def show_tray_tooltip(self, x: int, y: int, text: str = None) -> None:
+        """显示自定义托盘 tooltip（鼠标悬停托盘图标时调用）
+
+        - 固定显示在鼠标（托盘图标）上方，与鼠标进入方向无关
+        - 鼠标移开托盘图标后自动消失（监视线程检测鼠标位置）
+        - 3 秒最大显示时长兜底
+        """
+        try:
+            if not self._tray_tooltip_window:
+                return
+            # 托盘菜单可见期间屏蔽 tooltip：右键菜单打开后鼠标仍停在托盘图标上，
+            # WM_MOUSEMOVE 会持续触发，tooltip 弹出会遮挡菜单
+            if self._tray_menu_visible():
+                self.hide_tray_tooltip()
+                return
+            # 已显示：仅重置隐藏 timer，不重新定位（tooltip 固定）
+            if self._tray_tooltip_visible:
+                if self._tray_tooltip_timer:
+                    try:
+                        self._tray_tooltip_timer.cancel()
+                    except Exception:
+                        pass
+                self._tray_tooltip_timer = threading.Timer(3.0, self.hide_tray_tooltip)
+                self._tray_tooltip_timer.daemon = True
+                self._tray_tooltip_timer.start()
+                return
+            # 未显示：若鼠标还在上次锚点附近（同一图标上），复用上次位置（保持固定）；
+            # 否则用当前位置作为新锚点
+            if (self._tray_tooltip_anchor
+                    and abs(x - self._tray_tooltip_anchor[0]) < 100
+                    and abs(y - self._tray_tooltip_anchor[1]) < 100):
+                sx, sy = self._tray_tooltip_anchor
+            else:
+                sx, sy = x, y
+                self._tray_tooltip_anchor = (x, y)
+            if text:
+                try:
+                    import json as _json
+                    safe = _json.dumps(text)
+                    self._tray_tooltip_window.evaluate_js(
+                        f"window.__setTooltip && window.__setTooltip({safe})"
+                    )
+                except Exception:
+                    pass
+            time.sleep(0.05)
+            if self._win32_show_tray_tooltip(sx, sy):
+                self._tray_tooltip_visible = True
+                self._tray_tooltip_anchor = (sx, sy)  # 记录实际显示锚点（watchdog 用）
+                self._start_tooltip_watchdog()
+            # 3 秒后自动隐藏
+            if self._tray_tooltip_timer:
+                try:
+                    self._tray_tooltip_timer.cancel()
+                except Exception:
+                    pass
+            self._tray_tooltip_timer = threading.Timer(3.0, self.hide_tray_tooltip)
+            self._tray_tooltip_timer.daemon = True
+            self._tray_tooltip_timer.start()
+        except Exception as e:
+            log.debug(f"show_tray_tooltip error: {e}")
+
+    def _start_tooltip_watchdog(self):
+        """启动监视线程：鼠标移开托盘图标区域（锚点 40px 内）则隐藏 tooltip"""
+        def _watch():
+            try:
+                while self._tray_tooltip_visible:
+                    import ctypes
+                    from ctypes import wintypes
+                    class POINT(ctypes.Structure):
+                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+                    pt = POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    ax, ay = self._tray_tooltip_anchor or (pt.x, pt.y)
+                    # 距锚点超过 40px 视为鼠标已移开托盘图标（图标约 16-32px）
+                    if abs(pt.x - ax) > 40 or abs(pt.y - ay) > 40:
+                        self.hide_tray_tooltip()
+                        return
+                    time.sleep(0.15)
+            except Exception:
+                pass
+        t = threading.Thread(target=_watch, daemon=True)
+        t.start()
+
+    def hide_tray_tooltip(self) -> None:
+        """隐藏自定义托盘 tooltip"""
+        try:
+            if self._tray_tooltip_timer:
+                try:
+                    self._tray_tooltip_timer.cancel()
+                except Exception:
+                    pass
+                self._tray_tooltip_timer = None
+            self._tray_tooltip_visible = False
+            if not self._tray_tooltip_window:
+                return
+            self._win32_hide_tray_tooltip()
+        except Exception as e:
+            log.debug(f"hide_tray_tooltip error: {e}")
+
+    def resize_tray_tooltip(self, width: int, height: int) -> None:
+        """按内容自适应调整托盘 tooltip 窗口尺寸（保持左上角）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_tray_tooltip_hwnd()
+            if not hwnd:
+                return
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            user32.MoveWindow(hwnd, rect.left, rect.top, max(width, 80), max(height, 26), True)
+            # 圆角窗口区域随尺寸更新
+            self._apply_round_region(hwnd, max(width, 80), max(height, 26))
+            log.debug(f"Tray tooltip resize to {width}x{height}")
+        except Exception as e:
+            log.debug(f"resize_tray_tooltip failed: {e}")
+
+    def show_window_from_tray(self) -> dict:
+        """托盘菜单：显示主窗口"""
+        try:
+            import main as main_module
+            main_module._show_window()
+            return {"success": True}
+        except Exception as e:
+            log.error(f"show_window_from_tray error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def tray_hide_window(self) -> dict:
+        """托盘菜单：隐藏主窗口"""
+        try:
+            if self._window:
+                self._window.hide()
+                try:
+                    import main as main_module
+                    main_module._window_visible = False
+                except Exception:
+                    pass
+                log.info("Tray menu: window hidden")
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def tray_quit(self) -> dict:
+        """托盘菜单：退出应用"""
+        try:
+            import main as main_module
+            threading.Thread(target=main_module._quit_app, daemon=True).start()
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     def save_settings(self, settings: dict) -> dict:
         """保存设置"""
         try:
@@ -827,6 +1462,10 @@ class Api:
                 config.set(key, value)
             config.save()
             
+            # 划词显示模式变化时更新托盘提示
+            if "selection_display_mode" in settings:
+                self._update_tray_tooltip(settings.get("selection_display_mode"))
+            
             # 只在快捷键实际变化时重新注册
             new_hotkey = config.get("hotkey", "")
             new_sel_hotkey = config.get("selection_translate_hotkey", "")
@@ -837,6 +1476,17 @@ class Api:
             return {"success": True}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    def _update_tray_tooltip(self, display_mode: str = None) -> None:
+        """更新托盘图标提示（显示当前划词模式）"""
+        try:
+            from core.tray_manager import tray_manager
+            mode = display_mode or config.get("selection_display_mode", "bubble")
+            mode_text = "气泡" if mode == "bubble" else "窗口"
+            tray_manager.update_tooltip(f"{APP_NAME} · 划词：{mode_text}模式")
+            log.info(f"Tray tooltip updated: 划词={mode_text}模式")
+        except Exception as e:
+            log.debug(f"Update tray tooltip failed: {e}")
     
     def _update_hotkey(self, hotkey: str, selection_hotkey: str = ""):
         """更新全局快捷键"""
@@ -975,39 +1625,36 @@ class Api:
     def set_on_top(self, on_top: bool) -> None:
         """
         设置窗口是否置顶。
-        
-        pywebview 的 window.on_top 在 GUI 线程中执行 SetWindowPos，
-        但从 JS API 线程直接赋值会死锁。
-        解决方案：在独立线程中延迟一小段时间再赋值，
-        让 JS API 调用先返回，避免死锁。
+
+        用 Win32 SetWindowPos 直接设置（对隐藏窗口也有效，实测稳定持久），
+        并持久化到 config（唤起窗口时按此恢复，避免复选框状态漂移）。
+        不依赖 pywebview 的 on_top 属性（其 setter 需 GUI 线程，跨线程调用可能死锁或
+        静默失败；Win32 直设已完全可靠）。
         """
         if not self._window:
             return
+        # 持久化用户意愿
+        try:
+            config.set("window_on_top", bool(on_top))
+            config.save()
+        except Exception:
+            pass
         
         def _apply():
             try:
-                # 短暂延迟，让当前 JS API 调用先返回
-                import time
-                time.sleep(0.05)
-                self._window.on_top = on_top
-                log.info(f"Window on_top={on_top}")
+                import ctypes
+                # hWndInsertAfter 必须是 64 位指针值——直接传 -1 会被 ctypes 按 32 位 c_int
+                # 截断，SetWindowPos 收到错误句柄导致置顶无效。用 c_void_p(-1) 保证 64 位。
+                u32 = ctypes.windll.user32
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                hwnd = u32.FindWindowW(None, APP_NAME)
+                if hwnd:
+                    flag = ctypes.c_void_p(-1) if on_top else ctypes.c_void_p(-2)
+                    ok = u32.SetWindowPos(hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                    log.info(f"Window on_top={on_top} via Win32 (hwnd={hwnd:#x}, ok={ok})")
             except Exception as e:
-                log.warning(f"set_on_top failed: {e}")
-                # fallback: Win32 API
-                try:
-                    import ctypes
-                    u32 = ctypes.windll.user32
-                    SWP_NOMOVE = 0x0002
-                    SWP_NOSIZE = 0x0001
-                    HWND_TOPMOST = -1
-                    HWND_NOTOPMOST = -2
-                    hwnd = u32.FindWindowW(None, APP_NAME)
-                    if hwnd:
-                        flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-                        u32.SetWindowPos(hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-                        log.info(f"Window on_top={on_top} via Win32 (hwnd={hwnd:#x})")
-                except Exception as e2:
-                    log.warning(f"Win32 fallback failed: {e2}")
+                log.warning(f"set_on_top error: {e}")
         
         import threading
         threading.Thread(target=_apply, daemon=True).start()
@@ -1023,6 +1670,15 @@ class Api:
                 import main as main_module
                 main_module._window_visible = False
             except ImportError:
+                pass
+            # 手动关闭窗口 = 取消置顶（窗口已隐藏，置顶无意义；
+            # 避免托盘菜单"窗口置顶"仍显示开启状态，下次唤起不会意外置顶）
+            try:
+                if bool(config.get("window_on_top", False)):
+                    self.set_on_top(False)
+                    self.main_set_pinned_state(False)
+                    log.info("Window closed: topmost cleared")
+            except Exception:
                 pass
             log.info("Window hidden to system tray")
         elif self._window:
@@ -1286,27 +1942,31 @@ class Api:
             return {"success": False, "error": str(e)}
     
     def _show_window_for_selection(self):
-        """显示主窗口（划词翻译时调用），强制置顶"""
+        """显示主窗口（划词翻译时调用），临时置顶（按用户意愿恢复）"""
         try:
             if self._window:
                 log.info("Showing window for selection translate...")
                 self._window.show()
                 self._window.restore()
                 
-                # 用 Win32 API 强制置顶（从 pywebview 线程调用，有正确的上下文）
+                # 用 Win32 API 临时置顶（从 pywebview 线程调用，有正确的上下文）
                 try:
                     import ctypes
                     u32 = ctypes.windll.user32
                     SW_RESTORE = 9
                     SWP_NOMOVE = 0x0002
                     SWP_NOSIZE = 0x0001
-                    HWND_TOPMOST = -1
+                    HWND_TOPMOST = ctypes.c_void_p(-1)  # 64 位指针值
+                    HWND_NOTOPMOST = ctypes.c_void_p(-2)
                     
                     hwnd = u32.FindWindowW(None, APP_NAME)
                     if hwnd:
                         u32.ShowWindow(hwnd, SW_RESTORE)
                         u32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
                         u32.SetForegroundWindow(hwnd)
+                        # 按用户意愿恢复（未开启置顶则取消，避免复选框恒勾选）
+                        if not bool(config.get("window_on_top", False)):
+                            u32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
                         log.info(f"Window set topmost (hwnd={hwnd:#x})")
                 except Exception as e:
                     log.debug(f"Win32 topmost failed: {e}")
