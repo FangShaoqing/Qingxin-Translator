@@ -523,6 +523,63 @@ class Api:
         self._bubble_visible = False
         log.info("Bubble hidden")
     
+    def download_update(self, url: str) -> dict:
+        """后台静默下载更新安装包，完成后回调前端 __onUpdateDownloaded"""
+        try:
+            if not url:
+                return {"success": False, "error": "下载地址为空"}
+            from core.update_manager import download_update
+            version = _update_version or ""
+            download_update(
+                url,
+                version,
+                on_done=lambda path: self._safe_update_js(
+                    f"window.__onUpdateDownloaded && window.__onUpdateDownloaded({json.dumps(path)})"
+                ),
+                on_error=lambda msg: self._safe_update_js(
+                    f"window.__onUpdateDownloadFailed && window.__onUpdateDownloadFailed({json.dumps(msg)})"
+                )
+            )
+            return {"success": True}
+        except Exception as e:
+            log.error(f"download_update error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _safe_update_js(self, code: str):
+        """向主窗口推送 JS（失败静默）"""
+        try:
+            if self._window:
+                self._window.evaluate_js(code)
+        except Exception as e:
+            log.debug(f"Update evaluate_js failed: {e}")
+
+    def install_update(self, now: bool) -> dict:
+        """
+        安装已下载的更新。
+
+        now=True:  立即安装——启动安装程序（静默覆盖原程序）并退出应用
+        now=False: 稍后安装——记录待安装，应用退出时静默执行
+        """
+        try:
+            from core.update_manager import get_installer_path, run_installer, save_pending_install
+            installer = get_installer_path()
+            if not installer:
+                return {"success": False, "error": "未找到已下载的安装包"}
+            if now:
+                # 先启动安装程序（分离进程），再退出应用
+                if run_installer(installer):
+                    log.info("Installer launched, quitting app for update")
+                    import main as main_module
+                    threading.Thread(target=main_module._quit_app, daemon=True).start()
+                    return {"success": True, "installing": True}
+                return {"success": False, "error": "启动安装程序失败"}
+            else:
+                save_pending_install(installer)
+                return {"success": True, "pending": True}
+        except Exception as e:
+            log.error(f"install_update error: {e}")
+            return {"success": False, "error": str(e)}
+
     def get_app_info(self) -> dict:
         """获取应用信息"""
         import sys
@@ -2058,6 +2115,10 @@ class Api:
             
             notes = release.get("body", "")[:500]
             
+            # 记录远程版本号（供下载更新时命名安装包）
+            global _update_version
+            _update_version = remote_version
+            
             log.info(f"Update available: v{APP_VERSION} -> v{remote_version}")
             
             return {
@@ -2083,3 +2144,6 @@ class Api:
 
 # 全局API实例
 api = Api()
+
+# 最近一次检测到的远程版本号（供下载更新命名安装包）
+_update_version = ""

@@ -1009,7 +1009,7 @@ function bindEvents() {
     document.addEventListener('keydown', handleKeydown);
     
     // 更新提示条
-    document.getElementById('update-bar-btn').addEventListener('click', openUpdateDownload);
+    document.getElementById('update-bar-btn').addEventListener('click', startUpdateInstall);
     document.getElementById('update-bar-close').addEventListener('click', dismissUpdateBar);
     
     // 模型相关按钮
@@ -1136,11 +1136,63 @@ function dismissUpdateBar() {
     _updateInfo = null;
 }
 
-async function openUpdateDownload() {
-    if (_updateInfo && _updateInfo.download_url) {
-        await callApi('open_download_page', _updateInfo.download_url);
+// 点击"安装"：隐藏提示条 → 后台静默下载安装包
+async function startUpdateInstall() {
+    if (!_updateInfo || !_updateInfo.download_url) return;
+    const btn = document.getElementById('update-bar-btn');
+    const bar = document.getElementById('update-bar');
+    
+    // 提示条消失，按钮显示下载中
+    btn.disabled = true;
+    btn.textContent = '下载中...';
+    showToast('正在后台下载更新...', 'info');
+    
+    const result = await callApi('download_update', _updateInfo.download_url);
+    if (!result.success) {
+        btn.disabled = false;
+        btn.textContent = '安装';
+        showToast('下载启动失败: ' + (result.error || '未知错误'), 'error');
     }
 }
+
+// 由后端回调：下载完成
+window.__onUpdateDownloaded = function(installerPath) {
+    const bar = document.getElementById('update-bar');
+    if (bar) bar.classList.add('hidden');
+    showToast('更新下载完成', 'success');
+    
+    // 弹窗询问：立即安装 or 稍后安装
+    showConfirm(
+        '更新已下载完成，是否立即安装？\n\n立即安装：退出应用并开始安装。\n稍后安装：下次退出应用时自动安装。',
+        '安装更新'
+    ).then((ok) => {
+        if (ok) {
+            // 立即安装
+            callApi('install_update', true).then((r) => {
+                if (!r.success) showToast('安装启动失败: ' + (r.error || ''), 'error');
+            });
+        } else {
+            // 稍后安装
+            callApi('install_update', false).then((r) => {
+                if (r.success) {
+                    showToast('将在退出应用后自动安装', 'success');
+                } else {
+                    showToast('设置稍后安装失败: ' + (r.error || ''), 'error');
+                }
+            });
+        }
+    });
+};
+
+// 由后端回调：下载失败
+window.__onUpdateDownloadFailed = function(errorMsg) {
+    const btn = document.getElementById('update-bar-btn');
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = '安装';
+    }
+    showToast('下载失败: ' + errorMsg, 'error');
+};
 
 // ========== 开发环境诊断 ==========
 

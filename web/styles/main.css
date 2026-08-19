@@ -170,18 +170,24 @@ body {
     flex-direction: column;
     padding: 16px;
     box-sizing: border-box;
+    position: relative;   /* update-bar 悬浮定位的锚点 */
 }
 
-/* Update Bar */
+/* Update Bar（悬浮小提示条：贴在输入框右上角，不占布局空间，避免挤压输入框） */
 .update-bar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 100;
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    margin-bottom: 12px;
+    gap: 6px;
+    max-width: 85%;
+    padding: 5px 8px 5px 10px;
     background: var(--pink-light);
     border: 1px solid var(--pink-primary);
-    border-radius: var(--radius-sm);
+    border-radius: 999px;   /* 胶囊形状，紧凑 */
+    box-shadow: var(--shadow-sm);
     animation: slideDown 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
@@ -195,20 +201,20 @@ body {
 }
 
 .update-bar-icon {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     flex-shrink: 0;
 }
 
 .update-bar-icon svg {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     color: var(--pink-dark);
 }
 
 #update-bar-text {
     flex: 1;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-primary);
     white-space: nowrap;
     overflow: hidden;
@@ -216,9 +222,9 @@ body {
 }
 
 .update-bar-btn {
-    padding: 3px 10px;
+    padding: 2px 10px;
     border: none;
-    border-radius: 6px;
+    border-radius: 999px;
     background: var(--pink-primary);
     color: var(--text-primary);
     font-size: 11px;
@@ -233,14 +239,20 @@ body {
     transform: translateY(-1px);
 }
 
+.update-bar-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+    transform: none;
+}
+
 .update-bar-close {
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     border: none;
     border-radius: 50%;
     background: transparent;
     color: var(--text-tertiary);
-    font-size: 14px;
+    font-size: 13px;
     line-height: 1;
     cursor: pointer;
     display: flex;

@@ -457,6 +457,13 @@ def _quit_app():
     except Exception:
         pass
     
+    # 检查待安装更新（"稍后安装"：退出时静默执行安装程序覆盖原程序）
+    try:
+        from core.update_manager import run_pending_install
+        run_pending_install()
+    except Exception:
+        pass
+    
     # 先停止托盘和快捷键
     try:
         from core.tray_manager import tray_manager
