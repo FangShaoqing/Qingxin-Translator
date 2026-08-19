@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QingxinBubble</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: transparent;
+            overflow: hidden;
+            user-select: text;
+            -webkit-user-select: text;
+            cursor: default;
+        }
+
+        .bubble {
+            background: #FFFFFF;
+            border: 1px solid #FADADE;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(250, 218, 222, 0.4);
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            animation: popIn 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        @keyframes popIn {
+            from { opacity: 0; transform: scale(0.92); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        /* 标题栏（迷你版主页面标题栏） */
+        .title-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: 26px;
+            padding: 0 8px;
+            background: #FFFFFF;
+            border-bottom: 1px solid rgba(250, 218, 222, 0.5);
+            flex-shrink: 0;
+        }
+
+        .title-left {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .title-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #FADADE, #F0C4C8);
+            box-shadow: 0 0 4px rgba(250, 218, 222, 0.8);
+        }
+
+        .title-label {
+            font-size: 10px;
+            color: #E8A0AA;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+
+        .bubble-close {
+            width: 16px;
+            height: 16px;
+            border: none;
+            border-radius: 50%;
+            background: transparent;
+            color: #999999;
+            font-size: 11px;
+            line-height: 1;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+        }
+
+        .bubble-close:hover {
+            background: rgba(0, 0, 0, 0.08);
+            color: #333333;
+        }
+
+        .bubble-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 4px 8px 6px;
+            overflow: hidden;
+        }
+
+        #bubble-source {
+            font-size: 11px;
+            color: #999999;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 22px;
+            overflow: hidden;
+            margin-bottom: 2px;
+            flex-shrink: 0;
+        }
+
+        #bubble-translation {
+            font-size: 13px;
+            color: #333333;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-word;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .bubble-error {
+            color: #f44336 !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="bubble">
+        <!-- 迷你标题栏 -->
+        <div class="title-bar">
+            <div class="title-left">
+                <span class="title-dot"></span>
+                <span class="title-label">划词翻译</span>
+            </div>
+            <button class="bubble-close" onclick="hideBubble()" title="关闭">×</button>
+        </div>
+        <div class="bubble-body">
+            <div id="bubble-source"></div>
+            <div id="bubble-translation">翻译中...</div>
+        </div>
+    </div>
+
+    <script>
+        // 由 Python 端 evaluate_js 调用，设置气泡内容
+        window.__setBubbleContent = function(sourceText, translation) {
+            document.getElementById('bubble-source').textContent = sourceText;
+            const el = document.getElementById('bubble-translation');
+            el.textContent = translation;
+            el.className = '';
+            fitBubbleHeight();
+        };
+
+        window.__setBubbleError = function(message) {
+            document.getElementById('bubble-source').textContent = '';
+            const el = document.getElementById('bubble-translation');
+            el.textContent = message;
+            el.className = 'bubble-error';
+            fitBubbleHeight();
+        };
+
+        // 根据内容自适应气泡窗口高度（标题栏26 + 原文 + 译文 + 内边距）
+        function fitBubbleHeight() {
+            try {
+                if (!window.pywebview || !window.pywebview.api) return;
+                const source = document.getElementById('bubble-source');
+                const translation = document.getElementById('bubble-translation');
+                const sourceH = source.scrollHeight > 22 ? 22 : source.scrollHeight;
+                const transH = translation.scrollHeight;
+                const total = 26 + 4 + sourceH + (sourceH > 0 ? 2 : 0) + transH + 6;
+                const height = Math.max(100, Math.min(total, 260));  // 100~260 自适应范围
+                window.pywebview.api.resize_bubble(280, Math.round(height));
+            } catch (e) {}
+        }
+
+        // 关闭气泡
+        function hideBubble() {
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.hide_bubble();
+                }
+            } catch (e) {}
+        }
+
+        // 鼠标悬停时暂停自动隐藏，移开后恢复
+        document.addEventListener('mouseenter', function() {
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.bubble_interacting(true);
+                }
+            } catch (e) {}
+        });
+        document.addEventListener('mouseleave', function() {
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.bubble_interacting(false);
+                }
+            } catch (e) {}
+        });
+    </script>
+</body>
+</html>

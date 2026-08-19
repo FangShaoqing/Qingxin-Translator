@@ -53,6 +53,14 @@ def setup_app():
     # 注册翻译引擎
     translator_manager.register_engine(llm_translator)
     
+    # 注册 Bing 备用引擎（主引擎失败时降级使用）
+    try:
+        from core.bing_translator import bing_translator
+        translator_manager.register_engine(bing_translator)
+        log.info("Bing fallback engine registered")
+    except Exception as e:
+        log.warning(f"Failed to register Bing engine: {e}")
+    
     # 打印可用引擎
     available = translator_manager.get_available_engines()
     log.info(f"Available translation engines: {available}")
@@ -132,8 +140,22 @@ def _toggle_window():
             log.warning("No window available for toggle")
             return
         
-        # 判断窗口是否隐藏（综合多种状态判断）
-        is_hidden = window.hidden or not _window_visible
+        # 用 Win32 检测窗口实际可见性（状态最可靠，避免 _window_visible 漂移）
+        hwnd = _find_window_hwnd()
+        if hwnd:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                # IsWindowVisible 检测实际可见性 + 非最小化状态
+                actually_visible = bool(user32.IsWindowVisible(hwnd)) and not user32.IsIconic(hwnd)
+                if actually_visible != _window_visible:
+                    log.info(f"Window state resynced: _window_visible {_window_visible} -> {actually_visible}")
+                    _window_visible = actually_visible
+            except Exception:
+                pass
+        
+        # 判断窗口是否隐藏（以实际可见性为准）
+        is_hidden = not _window_visible
         
         if is_hidden:
             # ---- 显示窗口 ----
@@ -164,17 +186,39 @@ def _toggle_window():
                     user32.ShowWindow(hwnd, SW_SHOW)
                     user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
 
-                    # AttachThreadInput 绕过 Windows 前台窗口限制
+                    # 强制窗口置顶 + 前台（多级保障）
                     try:
+                        # 1) 总是先做 Alt 键击解锁（模拟"最近有输入"，允许 SetForegroundWindow）
+                        user32.keybd_event(0x12, 0, 0, 0)          # Alt down
+                        user32.keybd_event(0x12, 0, 0x0002, 0)     # Alt up
+                        
+                        # 2) AttachThreadInput：必须 attach【当前调用线程】与【前台线程】
+                        #    （SetForegroundWindow 检查的是调用线程与前台线程的连接）
                         fg = user32.GetForegroundWindow()
                         fg_tid = user32.GetWindowThreadProcessId(fg, None)
-                        my_tid = kernel32.GetCurrentThreadId()
-                        if fg_tid != my_tid:
-                            user32.AttachThreadInput(my_tid, fg_tid, True)
-                        user32.SetForegroundWindow(hwnd)
-                        if fg_tid != my_tid:
+                        my_tid = kernel32.GetCurrentThreadId()  # 当前调用（热键回调）线程
+                        attached = False
+                        if fg and fg_tid != my_tid and fg_tid != 0:
+                            attached = user32.AttachThreadInput(my_tid, fg_tid, True)
+                        
+                        # 3) 设置前台 + 置顶
+                        ok = user32.SetForegroundWindow(hwnd)
+                        user32.BringWindowToTop(hwnd)
+                        
+                        if attached:
                             user32.AttachThreadInput(my_tid, fg_tid, False)
-                    except Exception:
+                        
+                        # 4) 验证是否真的成为前台窗口，失败则再重试一次
+                        if not ok or user32.GetForegroundWindow() != hwnd:
+                            user32.keybd_event(0x12, 0, 0, 0)
+                            user32.keybd_event(0x12, 0, 0x0002, 0)
+                            ok2 = user32.SetForegroundWindow(hwnd)
+                            user32.BringWindowToTop(hwnd)
+                            log.info(f"SetForegroundWindow retry: ok={ok2}, fg={user32.GetForegroundWindow()==hwnd}")
+                        else:
+                            log.info(f"SetForegroundWindow ok (my_tid={my_tid}, fg_tid={fg_tid})")
+                    except Exception as e:
+                        log.debug(f"Foreground set failed: {e}")
                         user32.BringWindowToTop(hwnd)
 
                     # 闪烁任务栏
@@ -199,6 +243,35 @@ def _toggle_window():
                     log.warning("Could not find window handle")
             except Exception as e:
                 log.debug(f"Win32 show failed: {e}")
+            
+            # 延迟一次置顶（窗口完全显示后再补一次，配合正确的线程 attach）
+            try:
+                import threading
+                hwnd2 = _find_window_hwnd()
+                if hwnd2:
+                    def _re_topmost():
+                        try:
+                            import ctypes
+                            user32_ = ctypes.windll.user32
+                            SWP_NOMOVE = 0x0002
+                            SWP_NOSIZE = 0x0001
+                            HWND_TOPMOST = -1
+                            user32_.SetWindowPos(hwnd2, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
+                            # 延迟置顶后再尝试一次前台
+                            fg2 = user32_.GetForegroundWindow()
+                            fg2_tid = user32_.GetWindowThreadProcessId(fg2, None)
+                            t2_tid = user32_.GetWindowThreadProcessId(hwnd2, None)
+                            if fg2_tid != t2_tid:
+                                user32_.AttachThreadInput(t2_tid, fg2_tid, True)
+                            user32_.SetForegroundWindow(hwnd2)
+                            if fg2_tid != t2_tid:
+                                user32_.AttachThreadInput(t2_tid, fg2_tid, False)
+                            log.info(f"Window re-topmost (hwnd={hwnd2:#x})")
+                        except Exception:
+                            pass
+                    threading.Timer(0.3, _re_topmost).start()
+            except Exception:
+                pass
             
             _window_visible = True
         
@@ -269,7 +342,20 @@ def _quit_app():
     except Exception:
         pass
     
-    # 销毁窗口（触发 pywebview 退出循环）
+    # 销毁所有窗口（pywebview 需全部窗口关闭后才退出事件循环）
+    # 注意：必须先销毁气泡窗口，否则事件循环永不退出
+    try:
+        from api import api as api_instance
+        if api_instance._bubble_window:
+            try:
+                api_instance._bubble_window.destroy()
+                log.info("Bubble window destroyed")
+            except Exception as e:
+                log.warning(f"Bubble destroy failed: {e}")
+    except Exception:
+        pass
+    
+    # 销毁主窗口（触发 pywebview 退出循环）
     try:
         window = webview.windows[0] if webview.windows else None
         if window:
@@ -382,7 +468,7 @@ def main():
     min_width = window_config.get("min_width", 420)
     min_height = window_config.get("min_height", 120)
     
-    # 创建窗口 - 使用js_api参数传递API
+    # 创建主窗口 - 使用js_api参数传递API
     window = webview.create_window(
         title=APP_NAME,
         url=str(ROOT_DIR / "web" / "index.html"),
@@ -400,6 +486,44 @@ def main():
     # 设置窗口引用
     api.set_window(window)
     
+    # 创建划词翻译气泡窗口（无边框、置顶）
+    # 注意：不用 hidden=True——hidden 窗口的 WebView2 可能不渲染页面（气泡是空窗口）
+    # 改为创建在屏幕外（-10000,-10000），页面正常加载，显示时再移到鼠标位置
+    try:
+        bubble = webview.create_window(
+            title="QingxinBubble",
+            url=str(ROOT_DIR / "web" / "bubble.html"),
+            width=280,
+            height=132,
+            frameless=True,
+            on_top=True,
+            draggable=False,   # 禁用 pywebview 内置拖动（避免误调 window.move(None) 报错）
+            easy_drag=False,   # 禁用全局拖动（默认 True，会导致按住气泡被拖动）
+            text_select=True,  # 允许选中气泡内的文本（默认 False 禁选）
+            x=-10000,      # 初始位置在屏幕外，用户不可见但页面正常加载
+            y=-10000,
+            background_color="#FFFFFF",
+            js_api=api
+        )
+        api.set_bubble_window(bubble)
+        
+        # 气泡窗口禁止关闭，只能隐藏（避免引用失效）；退出时允许关闭
+        def _on_bubble_closing():
+            global _real_quit
+            if _real_quit:
+                log.info("Bubble closing allowed (real quit)")
+                return True
+            log.info("Bubble closing requested, hiding instead")
+            try:
+                bubble.hide()
+            except Exception:
+                pass
+            return False
+        bubble.events.closing += _on_bubble_closing
+        log.info("Bubble window created (hidden)")
+    except Exception as e:
+        log.warning(f"Failed to create bubble window: {e}")
+    
     # 注册窗口关闭事件（处理 Alt+F4 等 OS 级关闭）
     window.events.closing += _on_closing
     
@@ -407,9 +531,23 @@ def main():
     def on_started():
         log.info("pywebview started, initializing components...")
         
+        # 启动后立即隐藏气泡窗口（它在屏幕外，但可能闪现/出现在任务栏）
+        try:
+            from api import api as api_instance
+            api_instance.hide_bubble()
+        except Exception:
+            pass
+        
         # 延迟初始化快捷键，确保 pywebview 完全启动
         import time
         time.sleep(1.0)
+        
+        # 再次确保气泡隐藏（WebView2 完全就绪后）
+        try:
+            from api import api as api_instance
+            api_instance.hide_bubble()
+        except Exception:
+            pass
         
         # 设置快捷键
         _setup_hotkey(window)

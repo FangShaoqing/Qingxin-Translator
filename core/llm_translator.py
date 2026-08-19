@@ -44,6 +44,27 @@ Rules:
 3. Keep proper nouns, brand names, and game titles as-is or use their well-known translations.
 4. No explanations, no quotes, no extra formatting."""
 
+# 译文质量模式提示词
+TRANSLATE_MODE_PROMPTS = {
+    "literal": SYSTEM_PROMPT_TEMPLATE,
+    "paraphrase": """You are a professional translator. Translate text from {source} to {target} using free paraphrase.
+
+Rules:
+1. Output ONLY the translated text, nothing else.
+2. Faithfully convey the meaning, but express it in a natural way that a native {target} speaker would use.
+3. Do not stick rigidly to the original sentence structure.
+4. Keep proper nouns, brand names, and game titles as-is or use their well-known translations.
+5. No explanations, no quotes, no extra formatting.""",
+    "polish": """You are a professional translator and editor. Translate text from {source} to {target} with careful polishing.
+
+Rules:
+1. Output ONLY the polished translated text, nothing else.
+2. Faithfully preserve the original meaning.
+3. Elevate the language: refine word choice, improve flow and rhythm, make it elegant and readable.
+4. Keep proper nouns, brand names, and game titles as-is or use their well-known translations.
+5. No explanations, no quotes, no extra formatting.""",
+}
+
 
 class LLMTranslator(TranslatorEngine):
     """
@@ -130,8 +151,12 @@ class LLMTranslator(TranslatorEngine):
                 f"{text}"
             )
         else:
-            system_prompt = SYSTEM_PROMPT_TEMPLATE.format(source=source_name, target=target_name)
+            # 根据译文质量模式选择 system prompt（直译/意译/润色）
+            mode = config.get("translate_mode", "literal")
+            mode_prompt = TRANSLATE_MODE_PROMPTS.get(mode, SYSTEM_PROMPT_TEMPLATE)
+            system_prompt = mode_prompt.format(source=source_name, target=target_name)
             user_prompt = f"Translate the following {source_name} text to {target_name}:\n{text}"
+            log.info(f"LLM: translate_mode={mode}")
         
         model = config.get("api_model") or "mimo-v2.5-pro"
         
@@ -243,8 +268,45 @@ class LLMTranslator(TranslatorEngine):
                 self._reset_client()
             return self._create_error_result(text, source_lang, target_lang, error_msg)
     
+    # ========== 重试机制 ==========
+    
+    # 可重试的 HTTP 状态码（429 限流、5xx 服务端错误）
+    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+    # 最大尝试次数（1 次原始 + 2 次重试）
+    MAX_ATTEMPTS = 3
+    # 重试退避基数（秒），每次重试等待 base * 2^attempt
+    RETRY_BACKOFF_BASE = 1.0
+    
+    def _is_retryable_error(self, e: Exception) -> bool:
+        """判断错误是否值得重试"""
+        # 网络层错误
+        if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout,
+                          httpx.ReadTimeout, httpx.ReadError,
+                          httpx.PoolTimeout, httpx.RemoteProtocolError)):
+            return True
+        
+        # HTTP 状态码错误
+        if isinstance(e, httpx.HTTPStatusError):
+            return e.response.status_code in self.RETRYABLE_STATUS
+        
+        # API 业务错误（通过 ValueError 抛出，携带状态码）
+        if isinstance(e, ValueError):
+            msg = str(e)
+            for code in self.RETRYABLE_STATUS:
+                if f"({code})" in msg:
+                    return True
+        
+        return False
+    
+    def _wait_before_retry(self, attempt: int):
+        """指数退避等待"""
+        import time
+        wait = self.RETRY_BACKOFF_BASE * (2 ** attempt)
+        log.info(f"Retrying in {wait:.1f}s... (attempt {attempt + 1}/{self.MAX_ATTEMPTS})")
+        time.sleep(wait)
+    
     def _call_api(self, text: str, source_lang: str, target_lang: str, is_mixed: bool = False) -> str:
-        """调用 LLM API（非流式）"""
+        """调用 LLM API（非流式，带重试）"""
         api_url = self._build_api_url()
         api_key = config.get("api_key", "")
         payload = self._build_payload(text, source_lang, target_lang, stream=False, is_mixed=is_mixed)
@@ -256,43 +318,68 @@ class LLMTranslator(TranslatorEngine):
         
         log.info(f"Calling API: {api_url} (model: {payload['model']})")
         log.info(f"Request payload keys: {list(payload.keys())}")
-        client = self._get_client()
-        response = client.post(api_url, headers=headers, json=payload)
         
-        if response.status_code != 200:
-            # 从响应体提取 API 错误信息
-            api_err = ""
+        last_error: Exception = None
+        for attempt in range(self.MAX_ATTEMPTS):
             try:
-                err_body = response.json()
-                api_err = err_body.get("error", {}).get("message", "")
-            except Exception:
-                api_err = response.text[:200]
-            
-            if api_err:
-                raise ValueError(f"API error ({response.status_code}): {api_err}")
-            response.raise_for_status()
+                client = self._get_client()
+                response = client.post(api_url, headers=headers, json=payload)
+                
+                if response.status_code != 200:
+                    # 从响应体提取 API 错误信息
+                    api_err = ""
+                    try:
+                        err_body = response.json()
+                        api_err = err_body.get("error", {}).get("message", "")
+                    except Exception:
+                        api_err = response.text[:200]
+                    
+                    error_msg = api_err or f"HTTP {response.status_code}"
+                    last_error = ValueError(f"API error ({response.status_code}): {error_msg}")
+                    
+                    if response.status_code in self.RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
+                        self._wait_before_retry(attempt)
+                        continue
+                    raise last_error
+                
+                result = response.json()
+                log.debug(f"API response: {result}")
+                
+                # 安全解析响应
+                choices = result.get("choices", [])
+                if not choices:
+                    error_msg = result.get("error", {}).get("message", "Empty response from API")
+                    raise ValueError(f"API returned no choices: {error_msg}")
+                
+                message = choices[0].get("message", {})
+                translated_text = message.get("content", "").strip()
+                
+                if not translated_text:
+                    raise ValueError("API returned empty translation")
+                
+                log.info(f"Translation OK: '{translated_text[:50]}...'")
+                return translated_text
+                
+            except (httpx.ConnectError, httpx.ConnectTimeout,
+                    httpx.ReadTimeout, httpx.ReadError,
+                    httpx.PoolTimeout, httpx.RemoteProtocolError) as e:
+                last_error = e
+                log.warning(f"Network error (attempt {attempt + 1}/{self.MAX_ATTEMPTS}): {e}")
+                if attempt < self.MAX_ATTEMPTS - 1:
+                    self._wait_before_retry(attempt)
+                    continue
+                # 网络错误时重置客户端，下次请求重新建立连接
+                self._reset_client()
         
-        result = response.json()
-        log.debug(f"API response: {result}")
-        
-        # 安全解析响应
-        choices = result.get("choices", [])
-        if not choices:
-            error_msg = result.get("error", {}).get("message", "Empty response from API")
-            raise ValueError(f"API returned no choices: {error_msg}")
-        
-        message = choices[0].get("message", {})
-        translated_text = message.get("content", "").strip()
-        
-        if not translated_text:
-            raise ValueError("API returned empty translation")
-        
-        log.info(f"Translation OK: '{translated_text[:50]}...'")
-        return translated_text
+        raise last_error
     
     def _call_api_stream(self, text: str, source_lang: str, target_lang: str,
                          on_chunk: Callable[[str], None]) -> str:
-        """调用 LLM API（流式）"""
+        """调用 LLM API（流式，带重试）
+        
+        重试策略：仅在尚未收到任何内容时重试（避免重复输出）。
+        已收到部分内容后中断 → 直接抛错，不重试。
+        """
         api_url = self._build_api_url()
         api_key = config.get("api_key", "")
         payload = self._build_payload(text, source_lang, target_lang, stream=True)
@@ -304,64 +391,97 @@ class LLMTranslator(TranslatorEngine):
         
         log.info(f"Calling API (stream): {api_url} (model: {payload['model']})")
         
-        full_text = []
+        last_error: Exception = None
         
-        with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)) as client:
-            with client.stream("POST", api_url, headers=headers, json=payload) as response:
-                if response.status_code != 200:
-                    err_text = response.read().decode("utf-8", errors="replace")
-                    api_err = ""
-                    try:
-                        import json as _json
-                        err_body = _json.loads(err_text)
-                        api_err = err_body.get("error", {}).get("message", "")
-                    except Exception:
-                        api_err = err_text[:200]
-                    
-                    if api_err:
-                        raise ValueError(f"API error ({response.status_code}): {api_err}")
-                    raise ValueError(f"API returned HTTP {response.status_code}")
+        for attempt in range(self.MAX_ATTEMPTS):
+            full_text = []
+            received_any = False
+            
+            try:
+                with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=60.0, write=5.0, pool=5.0)) as client:
+                    with client.stream("POST", api_url, headers=headers, json=payload) as response:
+                        if response.status_code != 200:
+                            err_text = response.read().decode("utf-8", errors="replace")
+                            api_err = ""
+                            try:
+                                import json as _json
+                                err_body = _json.loads(err_text)
+                                api_err = err_body.get("error", {}).get("message", "")
+                            except Exception:
+                                api_err = err_text[:200]
+                            
+                            error_msg = api_err or f"HTTP {response.status_code}"
+                            last_error = ValueError(f"API error ({response.status_code}): {error_msg}")
+                            
+                            if response.status_code in self.RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
+                                self._wait_before_retry(attempt)
+                                continue
+                            raise last_error
+                        
+                        for line in response.iter_lines():
+                            if not line:
+                                continue
+                            
+                            # 跳过 SSE 前缀
+                            if line.startswith("data: "):
+                                line = line[6:]
+                            
+                            if line.strip() == "[DONE]":
+                                break
+                            
+                            try:
+                                chunk = json.loads(line)
+                                log.debug(f"Stream chunk: {chunk}")
+                                
+                                # 安全解析 choices
+                                choices = chunk.get("choices", [])
+                                if not choices:
+                                    # 检查是否有错误信息
+                                    error = chunk.get("error")
+                                    if error:
+                                        raise ValueError(f"Stream error: {error.get('message', 'Unknown error')}")
+                                    continue
+                                
+                                delta = choices[0].get("delta", {})
+                                content = delta.get("content", "")
+                                
+                                if content:
+                                    full_text.append(content)
+                                    received_any = True
+                                    on_chunk(content)
+                            except json.JSONDecodeError:
+                                continue
                 
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    
-                    # 跳过 SSE 前缀
-                    if line.startswith("data: "):
-                        line = line[6:]
-                    
-                    if line.strip() == "[DONE]":
-                        break
-                    
-                    try:
-                        chunk = json.loads(line)
-                        log.debug(f"Stream chunk: {chunk}")
-                        
-                        # 安全解析 choices
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            # 检查是否有错误信息
-                            error = chunk.get("error")
-                            if error:
-                                raise ValueError(f"Stream error: {error.get('message', 'Unknown error')}")
-                            continue
-                        
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
-                        
-                        if content:
-                            full_text.append(content)
-                            on_chunk(content)
-                    except json.JSONDecodeError:
-                        continue
+                result = "".join(full_text).strip()
+                
+                if not result:
+                    raise ValueError("Stream returned empty translation")
+                
+                log.info(f"Stream translation OK: '{result[:50]}...'")
+                return result
+                
+            except (httpx.ConnectError, httpx.ConnectTimeout,
+                    httpx.ReadTimeout, httpx.ReadError,
+                    httpx.PoolTimeout, httpx.RemoteProtocolError) as e:
+                last_error = e
+                # 已收到内容则不再重试（避免重复输出）
+                if received_any:
+                    log.warning(f"Stream interrupted after receiving content: {e}")
+                    raise e
+                log.warning(f"Stream network error (attempt {attempt + 1}/{self.MAX_ATTEMPTS}): {e}")
+                if attempt < self.MAX_ATTEMPTS - 1:
+                    self._wait_before_retry(attempt)
+                    continue
+                self._reset_client()
+            except ValueError as e:
+                last_error = e
+                # 流式业务错误：未收到内容且可重试状态码 → 重试
+                if not received_any and self._is_retryable_error(e) and attempt < self.MAX_ATTEMPTS - 1:
+                    self._wait_before_retry(attempt)
+                    continue
+                raise e
         
-        result = "".join(full_text).strip()
-        
-        if not result:
-            raise ValueError("Stream returned empty translation")
-        
-        log.info(f"Stream translation OK: '{result[:50]}...'")
-        return result
+        raise last_error
     
     def test_connection(self) -> tuple[bool, str]:
         """测试 API 连接（使用短超时）"""
@@ -388,7 +508,7 @@ class LLMTranslator(TranslatorEngine):
             with httpx.Client(timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)) as client:
                 response = client.post(api_url, headers=headers, json=payload)
                 
-                log.info(f"Test response: status={response.status_code}, body={response.text[:300]}")
+                log.info(f"Test response: status={response.status_code}, body={str(response.text)[:300]}")
                 
                 if response.status_code != 200:
                     api_err = ""

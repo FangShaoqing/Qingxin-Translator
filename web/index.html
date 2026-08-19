@@ -52,26 +52,46 @@
     <div class="content">
         <!-- 翻译页面 -->
         <div id="translate-page" class="page active">
+            <!-- 更新提示条 -->
+            <div id="update-bar" class="update-bar hidden">
+                <div class="update-bar-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path d="M12 16v-4M12 8h.01M22 12c0 5.523-4.477 10-10 10S2 17.523 2 12 6.477 2 12 2s10 4.477 10 10z"/>
+                    </svg>
+                </div>
+                <span id="update-bar-text">发现新版本</span>
+                <button id="update-bar-btn" class="update-bar-btn">查看</button>
+                <button id="update-bar-close" class="update-bar-close" title="忽略">×</button>
+            </div>
+
             <div class="input-area">
                 <textarea id="source-text" placeholder="请输入文本" rows="3"></textarea>
             </div>
             <div class="output-area" id="output-area">
-                <div class="translation-content">
-                    <div id="translated-text"></div>
-                </div>
-                <div class="translation-actions">
-                    <button class="translation-btn" id="copy-translation" title="复制">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
-                            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-                        </svg>
-                    </button>
-                    <button class="translation-btn" id="speak-translation" title="朗读">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
-                            <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
-                        </svg>
-                    </button>
+                <div class="output-inner">
+                    <div class="translation-content">
+                        <div id="translated-text"></div>
+                    </div>
+                    <div class="translation-actions">
+                        <div class="translation-mode-wrap hidden" id="translation-mode-wrap" title="译文质量">
+                            <span class="translation-mode-slider" id="translation-mode-slider"></span>
+                            <button class="translation-mode-pill active" data-mode="literal">直译</button>
+                            <button class="translation-mode-pill" data-mode="paraphrase">意译</button>
+                            <button class="translation-mode-pill" data-mode="polish">润色</button>
+                        </div>
+                        <button class="translation-btn" id="copy-translation" title="复制">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                            </svg>
+                        </button>
+                        <button class="translation-btn" id="speak-translation" title="朗读">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+                                <path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"/>
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -121,6 +141,21 @@
                         </div>
                     </div>
                     <div class="setting-item">
+                        <span class="setting-label">划词翻译窗口样式</span>
+                        <div class="setting-control">
+                            <div class="pill-group" id="selection-mode-wrap">
+                                <span class="pill-group-slider" id="selection-mode-slider"></span>
+                                <button class="pill-group-btn" data-mode="bubble">气泡</button>
+                                <button class="pill-group-btn" data-mode="window">窗口</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 快捷键设置 -->
+                <div class="settings-card">
+                    <h3 class="card-title">快捷键</h3>
+                    <div class="setting-item">
                         <span class="setting-label">窗口唤醒快捷键</span>
                         <div class="setting-control">
                             <input type="text" id="hotkey" class="hotkey-input" placeholder="点击设置" readonly>
@@ -161,6 +196,17 @@
                         <div class="model-buttons">
                             <button id="refresh-models" class="btn-secondary">模型列表</button>
                             <button id="test-connection" class="btn-secondary">测试连接</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 开发环境诊断（仅开发环境显示） -->
+                <div class="settings-card" id="dev-tools-card" style="display: none;">
+                    <h3 class="card-title">开发工具</h3>
+                    <div class="setting-item">
+                        <span class="setting-label">日志诊断</span>
+                        <div class="model-buttons">
+                            <button id="open-log" class="btn-secondary">查看日志</button>
                         </div>
                     </div>
                 </div>

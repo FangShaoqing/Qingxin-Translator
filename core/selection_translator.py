@@ -16,7 +16,7 @@ from core.logger import log
 user32 = ctypes.windll.user32
 
 
-def _wait_modifiers_released(timeout=0.5):
+def _wait_modifiers_released(timeout=1.0):
     """等待所有修饰键松开（5ms 轮询）"""
     VKS = [0x11, 0x10, 0x12, 0x5B, 0x5C]
     deadline = time.time() + timeout
@@ -24,7 +24,7 @@ def _wait_modifiers_released(timeout=0.5):
         if not any(user32.GetAsyncKeyState(v) & 0x8000 for v in VKS):
             return
         time.sleep(0.005)
-    time.sleep(0.01)
+    time.sleep(0.05)
 
 
 def _try_send_ctrl_c() -> bool:
@@ -61,26 +61,38 @@ def _try_send_ctrl_c() -> bool:
         i.union.ki.dwFlags = flags
         return i
 
-    # 等修饰键松开
-    _wait_modifiers_released(0.5)
+    # 等修饰键松开（超时 0.8s）
+    _wait_modifiers_released(0.8)
 
-    # 清剪贴板（用 pyperclip，已验证可用）
+    # 主键（X）通常与修饰键同时松开；仅当仍按下时等待
+    # （快速检测主键状态，避免固定 sleep 延迟）
+    for _ in range(10):
+        if not (user32.GetAsyncKeyState(0x58) & 0x8000):  # VK_X
+            break
+        time.sleep(0.01)
+
+    # 记录剪贴板旧内容
     old_cb = None
     try:
         old_cb = pyperclip.paste()
     except Exception:
         pass
-    pyperclip.copy("")
 
-    # SendInput Ctrl+C
+    # 清剪贴板
+    try:
+        pyperclip.copy("")
+    except Exception:
+        pass
+
+    # SendInput Ctrl+C（注意：不要注入 Alt 键击，会激活目标应用菜单栏/取消选中）
     arr = (INPUT * 4)(
         mk(VK_CONTROL, 0), mk(VK_C, 0),
         mk(VK_C, KEYEVENTF_KEYUP), mk(VK_CONTROL, KEYEVENTF_KEYUP),
     )
     user32.SendInput(4, arr, ctypes.sizeof(INPUT))
 
-    # 等剪贴板有内容（最多 500ms，20ms 轮询）
-    for _ in range(25):
+    # 等剪贴板有内容（最多 1000ms，20ms 轮询）
+    for _ in range(50):
         time.sleep(0.02)
         try:
             t = pyperclip.paste()

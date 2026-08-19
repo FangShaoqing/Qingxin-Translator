@@ -136,11 +136,16 @@ class HotkeyManager:
             except Exception as e:
                 log.error(f"Hotkey poll error: {e}")
 
-            # 50ms 轮询间隔
-            self._stop_event.wait(timeout=0.05)
+            # 15ms 轮询间隔（更快响应，避免快速按键漏检）
+            self._stop_event.wait(timeout=0.015)
 
     def _all_keys_pressed(self, vks: FrozenSet[int]) -> bool:
-        """检查所有按键是否同时按下"""
+        """检查所有按键是否同时按下
+        
+        只检测 0x8000（当前按下），不用 0x0001 边沿位：
+        边沿位是线程独立的，打字等其他按键可能残留边沿，
+        导致按住 Ctrl+Alt 时误触发其他热键（如误触发 Ctrl+Alt+S）。
+        """
         for vk in vks:
             if not (user32.GetAsyncKeyState(vk) & 0x8000):
                 return False

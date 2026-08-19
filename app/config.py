@@ -31,6 +31,9 @@ DEFAULT_CONFIG = {
     "use_streaming": True,       # 使用流式传输（实时显示）
     "debounce_ms": 300,          # 输入防抖延迟（毫秒）
     
+    # 翻译设置
+    "translate_mode": "literal", # 译文质量：literal直译 / paraphrase意译 / polish润色
+    
     # 界面设置
     "theme": "light",            # "light" / "dark"
     "font_size": 14,
@@ -41,6 +44,7 @@ DEFAULT_CONFIG = {
     
     # 划词翻译
     "selection_translate_hotkey": "Ctrl+Alt+X",  # 划词翻译快捷键
+    "selection_display_mode": "bubble",          # 划词翻译结果展示：bubble气泡 / window窗口
 }
 
 

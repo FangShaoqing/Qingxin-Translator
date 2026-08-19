@@ -61,6 +61,7 @@ function initElements() {
     elements.pinBtn = document.getElementById('pin-btn');
     elements.loadingOverlay = document.getElementById('loading-overlay');
     elements.toast = document.getElementById('toast');
+    elements.translationModeWrap = document.getElementById('translation-mode-wrap');
 }
 
 // API调用封装
@@ -264,7 +265,7 @@ window.__onTranslateError = function(error) {
 };
 
 // 翻译文本（流式显示）
-async function translate(text) {
+async function translate(text, animate = true) {
     if (!text || !text.trim() || state.isTranslating) {
         if (!text || !text.trim()) {
             _collapseOutputArea();
@@ -275,8 +276,10 @@ async function translate(text) {
     state.isTranslating = true;
     state.streamingText = '';
     
-    // 翻译期间：显示译文区域
-    elements.outputArea.classList.add('visible');
+    // 记录译文框当前是否已展开（切换模式重译时不应重新触发展开动画）
+    const wasExpanded = elements.outputArea.classList.contains('visible');
+    
+    // 翻译期间：不展开译文框（避免先展开再收回的跳动），内容在完成后再显示
     elements.translatedText.textContent = '';
     elements.translatedText.className = 'translating';
     
@@ -286,45 +289,271 @@ async function translate(text) {
         if (result.success) {
             elements.translatedText.textContent = result.translation;
             elements.translatedText.className = '';
+            // 翻译成功后显示译文质量模式选择，并重算滑块位置（wrap 刚从 hidden 变为可见）
+            elements.translationModeWrap.classList.remove('hidden');
+            setTimeout(() => updateTranslateModeHighlight(), 50);
         } else {
             elements.translatedText.textContent = result.error || '翻译失败';
             elements.translatedText.className = 'error';
         }
         
-        // 翻译完成后才展开窗口
-        _expandOutputArea();
+        // 翻译完成后展开窗口（已展开时不再动画，只更新内容）
+        if (wasExpanded) {
+            // 内容可能变长，重新同步窗口高度
+            elements.outputArea.classList.add('visible');
+            _autoResizeForContent();
+        } else {
+            _expandOutputArea();
+        }
         
     } catch (error) {
         elements.translatedText.textContent = '翻译请求失败';
         elements.translatedText.className = 'error';
-        _expandOutputArea();
+        if (wasExpanded) {
+            elements.outputArea.classList.add('visible');
+            _autoResizeForContent();
+        } else {
+            _expandOutputArea();
+        }
     } finally {
         state.isTranslating = false;
     }
 }
 
-// 展开译文区域并调整窗口高度
-function _expandOutputArea() {
-    elements.outputArea.classList.add('visible');
-    // 等动画开始后再调整窗口高度（匹配 CSS 过渡时间）
-    setTimeout(() => _autoResizeForContent(), 50);
-    setTimeout(() => _autoResizeForContent(), 350);
+// ========== 译文质量模式（横向胶囊按钮组） ==========
+
+const TRANSLATE_MODES = {
+    literal: '直译',
+    paraphrase: '意译',
+    polish: '润色'
+};
+
+let _currentTranslateMode = 'literal';
+
+// 更新胶囊按钮高亮状态（滑块滑动到选中按钮）
+function updateTranslateModeHighlight() {
+    const pills = document.querySelectorAll('.translation-mode-pill');
+    const slider = document.getElementById('translation-mode-slider');
+    
+    pills.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === _currentTranslateMode);
+    });
+    
+    // 移动滑块到选中按钮
+    if (slider) {
+        const activeBtn = document.querySelector('.translation-mode-pill.active');
+        if (activeBtn) {
+            const wrap = document.getElementById('translation-mode-wrap');
+            // 滑块定位基于按钮在容器内的偏移
+            const btnRect = activeBtn.getBoundingClientRect();
+            const wrapRect = wrap.getBoundingClientRect();
+            slider.style.left = (btnRect.left - wrapRect.left + wrap.scrollLeft) + 'px';
+            slider.style.width = btnRect.width + 'px';
+        }
+    }
 }
 
-// 收起译文区域（带过渡动画）
+// 选择译文质量模式：保存并立即重译
+async function selectTranslateMode(mode) {
+    if (!TRANSLATE_MODES[mode]) return;
+    if (mode === _currentTranslateMode) return;  // 相同模式不重复翻译
+    
+    _currentTranslateMode = mode;
+    updateTranslateModeHighlight();
+    
+    // 保存模式到配置
+    try {
+        await callApi('save_settings', { translate_mode: mode });
+    } catch (e) {
+        // 保存失败不阻塞重译
+    }
+    
+    // 立即用新模式重新翻译当前文本
+    const text = elements.sourceText.value;
+    if (text && text.trim()) {
+        translate(text);
+    }
+}
+
+// ========== 划词翻译窗口样式（气泡/窗口） ==========
+
+let _currentSelectionMode = 'bubble';
+
+// 更新划词样式按钮高亮（滑块滑动到选中按钮）
+function updateSelectionModeHighlight(mode) {
+    if (mode) _currentSelectionMode = mode;
+    const btns = document.querySelectorAll('.pill-group-btn');
+    const slider = document.getElementById('selection-mode-slider');
+    
+    btns.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === _currentSelectionMode);
+    });
+    
+    // 移动滑块到选中按钮
+    if (slider) {
+        const activeBtn = document.querySelector('.pill-group-btn.active');
+        const wrap = document.getElementById('selection-mode-wrap');
+        if (activeBtn && wrap) {
+            const btnRect = activeBtn.getBoundingClientRect();
+            const wrapRect = wrap.getBoundingClientRect();
+            slider.style.left = (btnRect.left - wrapRect.left + wrap.scrollLeft) + 'px';
+            slider.style.width = btnRect.width + 'px';
+        }
+    }
+}
+
+// 选择划词翻译窗口样式：保存
+async function selectSelectionMode(mode) {
+    if (mode !== 'bubble' && mode !== 'window') return;
+    if (mode === _currentSelectionMode) return;
+    
+    _currentSelectionMode = mode;
+    updateSelectionModeHighlight();
+    
+    try {
+        await callApi('save_settings', { selection_display_mode: mode });
+    } catch (e) {
+        // 保存失败静默处理
+    }
+}
+
+// 处理粘贴的图片：OCR 识别 → 自动翻译
+function handleImagePaste(file) {
+    const reader = new FileReader();
+    
+    reader.onload = async (e) => {
+        const base64 = e.target.result.split(',')[1];  // 去掉 data:image/xxx;base64, 前缀
+        if (!base64) {
+            showToast('图片读取失败', 'error');
+            return;
+        }
+        
+        // 提示识别中
+        showToast('正在识别图片文字...', 'info', 2000);
+        
+        try {
+            const result = await callApi('translate_image', base64);
+            
+            if (result.success) {
+                // 识别出的原文填入输入框
+                elements.sourceText.value = result.source_text || result.translation;
+                elements.sourceText.dispatchEvent(new Event('input'));
+                
+                // 显示译文
+                elements.translatedText.textContent = result.translation;
+                elements.translatedText.className = '';
+                elements.outputArea.classList.add('visible');
+                elements.translationModeWrap.classList.remove('hidden');
+                _expandOutputArea();
+                
+                showToast('图片翻译完成', 'success', 2000);
+            } else {
+                showToast(result.error || '图片翻译失败', 'error');
+            }
+        } catch (error) {
+            showToast('图片翻译失败: ' + error.message, 'error');
+        }
+    };
+    
+    reader.onerror = () => {
+        showToast('图片读取失败', 'error');
+    };
+    
+    reader.readAsDataURL(file);
+}
+
+// 展开译文区域并调整窗口高度（JS 驱动高度动画，与窗口高度同步）
+function _expandOutputArea() {
+    const el = elements.outputArea;
+    el.classList.add('visible');
+    
+    // 临时禁用 CSS 过渡，让布局立即到位（padding 12px 生效），准确测量目标高度
+    el.style.transition = 'none';
+    el.style.height = 'auto';
+    const targetHeight = el.scrollHeight;
+    el.style.height = '0px';
+    void el.offsetHeight;  // 强制重排，确保 0px 生效
+    el.style.transition = '';
+    
+    // 用 requestAnimationFrame 动画高度 0 → targetHeight，每帧同步窗口高度
+    const duration = 350;
+    const startTime = performance.now();
+    const TITLE_BAR = 48, PADDING_TOP = 16, PADDING_BOTTOM = 16, GAP = 12;
+    
+    function frame(now) {
+        const t = Math.min((now - startTime) / duration, 1);
+        // easeOutCubic 缓动
+        const eased = 1 - Math.pow(1 - t, 3);
+        const currentHeight = targetHeight * eased;
+        el.style.height = currentHeight + 'px';
+        el.style.opacity = eased;
+        
+        // 同步调整窗口高度（窗口内容区高度 = 输入框 + 当前译文框高度）
+        try {
+            if (window.pywebview && window.pywebview.api) {
+                const inputHeight = elements.sourceText.offsetHeight;
+                const total = TITLE_BAR + PADDING_TOP + inputHeight
+                    + (currentHeight > 1 ? GAP + currentHeight : 0) + PADDING_BOTTOM;
+                window.pywebview.api.resize(520, Math.round(total));
+            }
+        } catch (e) {}
+        
+        if (t < 1) {
+            requestAnimationFrame(frame);
+        } else {
+            el.style.height = '';
+            el.style.opacity = '';
+            _autoResizeForContent();
+        }
+    }
+    requestAnimationFrame(frame);
+}
+
+// 收起译文区域（JS 驱动高度动画，与窗口高度同步）
 function _collapseOutputArea() {
     if (!elements.outputArea || !elements.outputArea.classList.contains('visible')) return;
     
-    elements.outputArea.classList.remove('visible');
+    const el = elements.outputArea;
+    // 测量当前完整高度（临时禁用过渡，确保 padding 到位）
+    el.style.transition = 'none';
+    const startHeight = el.scrollHeight;
+    el.style.transition = '';
     
-    // 同步调整窗口高度
-    setTimeout(() => _autoResizeForContent(), 50);
+    // 动画高度 startHeight → 0
+    const duration = 300;
+    const startTime = performance.now();
+    const TITLE_BAR = 48, PADDING_TOP = 16, PADDING_BOTTOM = 16, GAP = 12;
     
-    // 动画结束后清空内容
-    setTimeout(() => {
-        elements.translatedText.textContent = '';
-        _autoResizeForContent();
-    }, 400);
+    function frame(now) {
+        const t = Math.min((now - startTime) / duration, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const currentHeight = startHeight * (1 - eased);
+        el.style.height = currentHeight + 'px';
+        el.style.opacity = 1 - eased;
+        
+        // 同步调整窗口高度
+        try {
+            if (window.pywebview && window.pywebview.api) {
+                const inputHeight = elements.sourceText.offsetHeight;
+                const total = TITLE_BAR + PADDING_TOP + inputHeight
+                    + (currentHeight > 1 ? GAP + currentHeight : 0) + PADDING_BOTTOM;
+                window.pywebview.api.resize(520, Math.round(total));
+            }
+        } catch (e) {}
+        
+        if (t < 1) {
+            requestAnimationFrame(frame);
+        } else {
+            el.classList.remove('visible');
+            el.style.height = '';
+            el.style.opacity = '';
+            // 清空内容
+            elements.translatedText.textContent = '';
+            elements.translationModeWrap.classList.add('hidden');
+            _autoResizeForContent();
+        }
+    }
+    requestAnimationFrame(frame);
 }
 
 // 复制译文
@@ -493,6 +722,13 @@ async function loadSettings() {
         elements.launchAtStartup.checked = settings.launch_at_startup === true;
         elements.hotkey.value = settings.hotkey || '';
         elements.selectionHotkey.value = settings.selection_translate_hotkey || '';
+        
+        // 划词翻译窗口样式
+        updateSelectionModeHighlight(settings.selection_display_mode || 'bubble');
+        
+        // 译文质量模式：始终默认直译（不恢复上次保存的模式）
+        _currentTranslateMode = 'literal';
+        updateTranslateModeHighlight();
         
         // 翻译引擎设置
         elements.apiUrl.value = settings.api_url || '';
@@ -705,6 +941,23 @@ function bindEvents() {
         }, 300);
     });
     
+    // 粘贴图片 → OCR 识别 → 翻译
+    elements.sourceText.addEventListener('paste', (e) => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        
+        for (const item of items) {
+            if (item.type && item.type.startsWith('image/')) {
+                e.preventDefault();
+                const file = item.getAsFile();
+                if (file) {
+                    handleImagePaste(file);
+                }
+                break;
+            }
+        }
+    });
+    
     // 历史记录搜索
     let searchTimer;
     elements.searchInput.addEventListener('input', (e) => {
@@ -748,6 +1001,10 @@ function bindEvents() {
     elements.selectionHotkey.addEventListener('click', () => startHotkeyRecording(elements.selectionHotkey));
     document.addEventListener('keydown', handleKeydown);
     
+    // 更新提示条
+    document.getElementById('update-bar-btn').addEventListener('click', openUpdateDownload);
+    document.getElementById('update-bar-close').addEventListener('click', dismissUpdateBar);
+    
     // 模型相关按钮
     elements.refreshModelsBtn.addEventListener('click', () => refreshModels());
     elements.testConnectionBtn.addEventListener('click', testConnection);
@@ -763,6 +1020,16 @@ function bindEvents() {
     // 译文区域按钮
     document.getElementById('copy-translation').addEventListener('click', copyTranslation);
     document.getElementById('speak-translation').addEventListener('click', speakTranslation);
+    
+    // 译文质量模式（横向胶囊按钮组）
+    document.querySelectorAll('.translation-mode-pill').forEach(btn => {
+        btn.addEventListener('click', () => selectTranslateMode(btn.dataset.mode));
+    });
+    
+    // 划词翻译窗口样式按钮组
+    document.querySelectorAll('.pill-group-btn').forEach(btn => {
+        btn.addEventListener('click', () => selectSelectionMode(btn.dataset.mode));
+    });
 }
 
 // 窗口拖动功能
@@ -824,15 +1091,62 @@ window.__onSelectionTranslate = function(sourceText, translation) {
     elements.translatedText.textContent = translation;
     elements.translatedText.className = '';
     
+    // 显示译文模式选择并重算滑块位置
+    elements.translationModeWrap.classList.remove('hidden');
+    setTimeout(() => updateTranslateModeHighlight(), 50);
+    
     // 根据内容自动调整窗口高度
     setTimeout(() => _autoResizeForContent(), 50);
     setTimeout(() => _autoResizeForContent(), 350);
     
     // 让窗口获得焦点（触发 onfocus 事件）
     window.focus();
-    
-    showToast('划词翻译完成', 'success', 2000);
 };
+
+// ========== 检查更新 ==========
+let _updateInfo = null;
+
+async function checkForUpdate() {
+    try {
+        const result = await callApi('check_update');
+        if (result && result.has_update) {
+            _updateInfo = result;
+            const bar = document.getElementById('update-bar');
+            const text = document.getElementById('update-bar-text');
+            if (bar && text) {
+                text.textContent = `发现新版本 v${result.version}`;
+                bar.classList.remove('hidden');
+            }
+        }
+    } catch (e) {
+        // 静默失败，不影响用户体验
+    }
+}
+
+function dismissUpdateBar() {
+    const bar = document.getElementById('update-bar');
+    if (bar) bar.classList.add('hidden');
+    _updateInfo = null;
+}
+
+async function openUpdateDownload() {
+    if (_updateInfo && _updateInfo.download_url) {
+        await callApi('open_download_page', _updateInfo.download_url);
+    }
+}
+
+// ========== 开发环境诊断 ==========
+
+async function openLogFile() {
+    try {
+        const result = await callApi('open_log_file');
+        if (!result.success) {
+            showToast(result.error || '无法打开日志', 'error');
+        }
+    } catch (e) {
+        showToast('无法打开日志', 'error');
+    }
+}
 
 // 初始化
 async function init() {
@@ -845,12 +1159,28 @@ async function init() {
         initDrag();
         loadSettings();
         
+        // 检查是否为开发环境（显示开发工具卡片）
+        try {
+            const appInfo = await callApi('get_app_info');
+            if (appInfo && appInfo.is_dev) {
+                const devCard = document.getElementById('dev-tools-card');
+                if (devCard) devCard.style.display = '';
+                const openLogBtn = document.getElementById('open-log');
+                if (openLogBtn) openLogBtn.addEventListener('click', openLogFile);
+            }
+        } catch (e) {
+            // 开发工具检查失败不影响正常功能
+        }
+        
         // 延迟调整窗口大小，确保 DOM 已完全渲染
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 adjustWindowSize('translate');
             });
         });
+        
+        // 延迟检查更新（2秒后，不影响启动速度）
+        setTimeout(checkForUpdate, 2000);
     } catch (error) {
         console.error('API初始化失败:', error);
         showToast('应用初始化失败，请重启', 'error');

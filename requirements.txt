@@ -19,5 +19,8 @@ langdetect>=1.0.9
 # Image Processing (for icon generation)
 Pillow>=10.0.0
 
+# Windows OCR (image translation)
+winsdk>=1.0.0b10
+
 # Packaging
 pyinstaller>=6.0.0

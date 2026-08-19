@@ -89,8 +89,8 @@ class TrayManager:
                 menu=menu
             )
             
-            # 在新线程中运行（非 daemon 线程，确保托盘图标持续运行）
-            self._thread = threading.Thread(target=self._run, daemon=False, name="TrayIconThread")
+            # 在新线程中运行（daemon 线程，避免 pystray 卡住时阻塞进程退出）
+            self._thread = threading.Thread(target=self._run, daemon=True, name="TrayIconThread")
             self._thread.start()
             
             self._started = True

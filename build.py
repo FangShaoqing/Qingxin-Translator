@@ -30,6 +30,7 @@ config = {
     'datas': [
         (str(ROOT_DIR / 'resources' / 'icons'), 'resources/icons'),
         (str(ROOT_DIR / 'web'), 'web'),
+        (str(ROOT_DIR / 'core' / 'ocr.ps1'), 'core'),  # Windows OCR 脚本（图片翻译依赖）
     ],
     
     # 需要包含的隐藏导入

@@ -359,11 +359,13 @@ def main():
     ico_images = [create_app_icon(s) for s in ico_sizes]
 
     ico_path = icons_dir / "app.ico"
-    ico_images[0].save(
+    # 注意：主图必须是最大尺寸（Pillow 以主图大小作为上限过滤，
+    # 若主图为 16x16 则所有大于 16 的尺寸都会被跳过，导致图标模糊）
+    ico_images[-1].save(
         ico_path,
         format="ICO",
         sizes=[(s, s) for s in ico_sizes],
-        append_images=ico_images[1:]
+        append_images=ico_images[:-1]
     )
     print(f"  Created: {ico_path}")
 
