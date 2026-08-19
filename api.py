@@ -28,6 +28,7 @@ class Api:
         self._bubble_timer = None
         self._bubble_visible = False  # 自维护气泡可见状态
         self._bubble_pos = None       # 热键触发瞬间记录的鼠标位置 (x, y)
+        self._bubble_transparent = False  # 气泡窗口不透明（真透明在 WebView2 不可靠，渲染成黑底）
     
     def _capture_mouse_pos(self):
         """记录当前鼠标位置（热键触发瞬间调用，供翻译完成后定位气泡）"""
@@ -138,18 +139,19 @@ class Api:
             SW_RESTORE = 9
             HWND_TOPMOST = -1
             
-            # 强制窗口不透明（winforms 隐藏窗口用 Opacity=0 技巧，可能残留 WS_EX_LAYERED+alpha=0）
-            try:
-                GWL_EXSTYLE = -20
-                WS_EX_LAYERED = 0x00080000
-                LWA_ALPHA = 0x00000002
-                ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                if ex_style & WS_EX_LAYERED:
-                    # 设置 alpha=255（完全不透明）
-                    user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
-                    log.info("Bubble alpha forced to opaque")
-            except Exception as e:
-                log.debug(f"Bubble alpha fix failed: {e}")
+            # 强制窗口不透明（仅非透明窗口需要；透明窗口依赖 per-pixel alpha，不能强制）
+            if not self._bubble_transparent:
+                try:
+                    GWL_EXSTYLE = -20
+                    WS_EX_LAYERED = 0x00080000
+                    LWA_ALPHA = 0x00000002
+                    ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                    if ex_style & WS_EX_LAYERED:
+                        # 设置 alpha=255（完全不透明）
+                        user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+                        log.info("Bubble alpha forced to opaque")
+                except Exception as e:
+                    log.debug(f"Bubble alpha fix failed: {e}")
             
             # 移除任务栏图标（WS_EX_TOOLWINDOW），只显示在屏幕上
             try:
@@ -163,7 +165,12 @@ class Api:
             user32.ShowWindow(hwnd, SW_SHOW)
             user32.ShowWindow(hwnd, SW_RESTORE)
             
-            # 获取窗口当前尺寸（MoveWindow 需要宽高参数）
+            # 置顶（SetWindowPos 只做置顶，不移动）
+            # 注意：不要声明 argtypes——ctypes.windll 是全局共享的，
+            # pywebview 内部 SetWindowPos(handle, None, x, y, None, None, flags) 依赖默认的 None→NULL 转换
+            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002)  # NOSIZE|NOMOVE
+            
+            # 移动窗口：读取当前尺寸（JS 已 resize 后的值），避免显示时闪大气泡
             class RECT(ctypes.Structure):
                 _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                             ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
@@ -172,14 +179,8 @@ class Api:
             w = rect.right - rect.left
             h = rect.bottom - rect.top
             if w <= 0 or h <= 0:
-                w, h = 280, 132
+                w, h = 120, 60
             
-            # 置顶（SetWindowPos 只做置顶，不移动）
-            # 注意：不要声明 argtypes——ctypes.windll 是全局共享的，
-            # pywebview 内部 SetWindowPos(handle, None, x, y, None, None, flags) 依赖默认的 None→NULL 转换
-            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002)  # NOSIZE|NOMOVE
-            
-            # 移动窗口（MoveWindow 参数全为 32 位 int，无 HWND 错位风险）
             moved = user32.MoveWindow(hwnd, x, y, w, h, True)
             log.info(f"Bubble moved to ({x}, {y}) size={w}x{h}, ok={moved}")
             return True
@@ -209,6 +210,7 @@ class Api:
             user32 = ctypes.windll.user32
             hwnd = self._find_bubble_hwnd()
             if not hwnd:
+                log.warning(f"resize_bubble: hwnd not found (w={width}, h={height})")
                 return
             # 读取当前位置
             class RECT(ctypes.Structure):
@@ -217,10 +219,15 @@ class Api:
             rect = RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             # 调整尺寸（保持左上角不变）
-            user32.MoveWindow(hwnd, rect.left, rect.top, width, height, True)
-            log.debug(f"Bubble resized to {width}x{height}")
+            ok = user32.MoveWindow(hwnd, rect.left, rect.top, width, height, True)
+            # 验证实际尺寸（MoveWindow 后立即读回）
+            rect2 = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect2))
+            actual_w = rect2.right - rect2.left
+            actual_h = rect2.bottom - rect2.top
+            log.info(f"Bubble resize: target={width}x{height}, actual={actual_w}x{actual_h}, pos=({rect.left},{rect.top}), ok={ok}")
         except Exception as e:
-            log.debug(f"Bubble resize failed: {e}")
+            log.error(f"Bubble resize failed: {e}")
 
     def show_bubble(self, source_text: str, translation: str) -> None:
         """在鼠标附近显示翻译气泡，5 秒后自动隐藏；气泡不可用时降级到主窗口显示"""
@@ -242,6 +249,11 @@ class Api:
             f"window.__setBubbleContent && window.__setBubbleContent({safe_source}, {safe_translation})"
         )
         
+        # 等待 JS 端 fitBubbleHeight 完成 resize（异步 api 调用需要时间），
+        # 让气泡以正确尺寸显示，避免"先小后大"的跳变
+        import time as _time
+        _time.sleep(0.15)
+        
         # 定位到鼠标位置（优先使用热键触发瞬间记录的位置）
         try:
             import ctypes
@@ -259,9 +271,9 @@ class Api:
                 ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
                 pt_x, pt_y = pt.x, pt.y
             
-            # 气泡窗口尺寸（固定 280x132）
-            width = 280
-            height = 132
+            # 气泡窗口初始尺寸（JS 自适应后由 resize_bubble 修正）
+            width = 120
+            height = 60
             
             # 屏幕尺寸
             screen_w = ctypes.windll.user32.GetSystemMetrics(0)
@@ -296,28 +308,29 @@ class Api:
                 self._fallback_show_main(source_text, translation)
                 return
             
-            # 检查气泡窗口是否真的不透明（避免空气泡：WS_EX_LAYERED + alpha=0 时窗口不可见）
-            try:
-                import ctypes as _ct
-                GWL_EXSTYLE = -20
-                WS_EX_LAYERED = 0x00080000
-                LWA_ALPHA = 0x00000002
-                ex_style = user32_.GetWindowLongW(bubble_hwnd, GWL_EXSTYLE)
-                if ex_style & WS_EX_LAYERED:
-                    # 读取 alpha 值
-                    alpha = _ct.c_ubyte(0)
-                    user32_.GetLayeredWindowAttributes(bubble_hwnd, None, _ct.byref(alpha), None)
-                    if alpha.value == 0:
-                        log.warning("Bubble is transparent (alpha=0), forcing opaque")
-                        user32_.SetLayeredWindowAttributes(bubble_hwnd, 0, 255, LWA_ALPHA)
-                        # 强制后再次检查
+            # 检查气泡窗口是否真的可见（透明窗口跳过 alpha 检查——per-pixel alpha 读取值不可靠）
+            if not self._bubble_transparent:
+                try:
+                    import ctypes as _ct
+                    GWL_EXSTYLE = -20
+                    WS_EX_LAYERED = 0x00080000
+                    LWA_ALPHA = 0x00000002
+                    ex_style = user32_.GetWindowLongW(bubble_hwnd, GWL_EXSTYLE)
+                    if ex_style & WS_EX_LAYERED:
+                        # 读取 alpha 值
+                        alpha = _ct.c_ubyte(0)
                         user32_.GetLayeredWindowAttributes(bubble_hwnd, None, _ct.byref(alpha), None)
                         if alpha.value == 0:
-                            log.warning("Bubble still transparent, falling back to main window")
-                            self._fallback_show_main(source_text, translation)
-                            return
-            except Exception as e:
-                log.debug(f"Bubble transparency check failed: {e}")
+                            log.warning("Bubble is transparent (alpha=0), forcing opaque")
+                            user32_.SetLayeredWindowAttributes(bubble_hwnd, 0, 255, LWA_ALPHA)
+                            # 强制后再次检查
+                            user32_.GetLayeredWindowAttributes(bubble_hwnd, None, _ct.byref(alpha), None)
+                            if alpha.value == 0:
+                                log.warning("Bubble still transparent, falling back to main window")
+                                self._fallback_show_main(source_text, translation)
+                                return
+                except Exception as e:
+                    log.debug(f"Bubble transparency check failed: {e}")
             
             self._bubble_visible = True
             log.info(f"Bubble shown at ({x}, {y})")
@@ -1222,6 +1235,9 @@ class Api:
             if result.success:
                 log.info(f"Selection translate success: '{result.translated_text[:50]}...'")
                 
+                # 自动复制译文（如果开启）
+                self._auto_copy_result(result.translated_text)
+                
                 # 保存到历史记录
                 History.add(
                     source_text=text,
@@ -1244,6 +1260,8 @@ class Api:
                 fallback = self._translate_with_fallback(text, lang, target_lang, is_mixed=is_mixed)
                 if fallback.get("success"):
                     bing_text = fallback.get("translation", "")
+                    # 自动复制译文（如果开启）
+                    self._auto_copy_result(bing_text)
                     # 保存到历史记录（标记为 bing 引擎）
                     History.add(
                         source_text=text,

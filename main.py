@@ -469,6 +469,7 @@ def main():
     min_height = window_config.get("min_height", 120)
     
     # 创建主窗口 - 使用js_api参数传递API
+    # 屏幕外创建（避免 WebView2 初始化时的白屏/黑屏闪烁），页面加载完成后移到屏幕中央
     window = webview.create_window(
         title=APP_NAME,
         url=str(ROOT_DIR / "web" / "index.html"),
@@ -479,28 +480,49 @@ def main():
         frameless=True,
         easy_drag=False,  # 禁用全局拖动，只允许标题栏拖动
         on_top=False,
+        x=-10000,  # 屏幕外创建，加载完成后再显示（避免启动闪烁）
+        y=-10000,
         background_color="#FFFFFF",
         js_api=api
     )
     
+    # 页面加载完成后移到屏幕中央（避免 WebView2 白/黑屏闪烁）
+    def _on_main_loaded():
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            screen_w = user32.GetSystemMetrics(0)
+            screen_h = user32.GetSystemMetrics(1)
+            win_w = window.width
+            win_h = window.height
+            cx = max(0, (screen_w - win_w) // 2)
+            cy = max(0, (screen_h - win_h) // 2)
+            window.move(cx, cy)
+            log.info(f"Main window moved to center ({cx}, {cy})")
+        except Exception as e:
+            log.debug(f"Center window failed: {e}")
+    window.events.loaded += _on_main_loaded
+    
     # 设置窗口引用
     api.set_window(window)
     
-    # 创建划词翻译气泡窗口（无边框、置顶）
+    # 创建划词翻译气泡窗口（无边框、置顶、白色无边框极简样式）
     # 注意：不用 hidden=True——hidden 窗口的 WebView2 可能不渲染页面（气泡是空窗口）
+    # 注意：不用 transparent=True——WebView2+WinForms 的真透明不可靠（渲染成黑底）
     # 改为创建在屏幕外（-10000,-10000），页面正常加载，显示时再移到鼠标位置
     try:
         bubble = webview.create_window(
             title="QingxinBubble",
-            url=str(ROOT_DIR / "web" / "bubble.html"),
-            width=280,
-            height=132,
+            url=str(ROOT_DIR / "web" / "bubble.html") + "?v=3",  # 版本号强制刷新 WebView2 缓存
+            width=120,       # 初始小尺寸，避免显示时闪大气泡（JS 会自适应修正）
+            height=60,
+            min_size=(1, 1),   # 关键：取消默认最小尺寸(200x100)限制，否则内容自适应缩小时被钳制
             frameless=True,
             on_top=True,
-            draggable=False,   # 禁用 pywebview 内置拖动（避免误调 window.move(None) 报错）
-            easy_drag=False,   # 禁用全局拖动（默认 True，会导致按住气泡被拖动）
-            text_select=True,  # 允许选中气泡内的文本（默认 False 禁选）
-            x=-10000,      # 初始位置在屏幕外，用户不可见但页面正常加载
+            draggable=False,    # 禁用 pywebview 内置拖动（避免误调 window.move(None) 报错）
+            easy_drag=False,    # 禁用全局拖动（默认 True，会导致按住气泡被拖动）
+            text_select=True,   # 允许选中气泡内的文本（默认 False 禁选）
+            x=-10000,       # 初始位置在屏幕外，用户不可见但页面正常加载
             y=-10000,
             background_color="#FFFFFF",
             js_api=api
