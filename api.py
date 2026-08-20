@@ -38,6 +38,11 @@ class Api:
         self._tray_tooltip_anchor = None
         self._tray_tooltip_pos = None
         self._tray_tooltip_shown_at = 0.0
+        # 选区悬浮翻译按钮
+        self._hover_btn_window = None
+        self._hover_btn_timer = None
+        self._hover_btn_visible = False
+        self._hover_btn_pos = None
     
     def _capture_mouse_pos(self):
         """记录当前鼠标位置（热键触发瞬间调用，供翻译完成后定位气泡）"""
@@ -70,6 +75,10 @@ class Api:
         """设置自定义托盘 tooltip 窗口引用"""
         self._tray_tooltip_window = window
         self._tray_tooltip_timer = None
+    
+    def set_hover_btn_window(self, window):
+        """设置选区悬浮翻译按钮窗口引用"""
+        self._hover_btn_window = window
     
     # ========== 划词翻译气泡 ==========
     
@@ -609,6 +618,150 @@ class Api:
                 return {"success": True}
             return {"success": False, "error": "日志文件不存在"}
         except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def get_logs(self, count: int = 300, keyword: str = "") -> dict:
+        """获取日志尾部内容（应用内日志查看器使用，正式版可用）"""
+        try:
+            from core.logger import log
+            log_file = log.get_log_file()
+            if not log_file.exists():
+                return {"success": True, "lines": [], "error": "日志文件不存在"}
+            # 读取文件尾部（避免大文件全量读取）
+            with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                # 读取最后 count*2 行（粗读，再截取）
+                lines = f.readlines()
+            lines = [l.rstrip("\n") for l in lines]
+            if keyword:
+                kw = keyword.lower()
+                lines = [l for l in lines if kw in l.lower()]
+            tail = lines[-count:] if count > 0 else lines
+            return {"success": True, "lines": tail}
+        except Exception as e:
+            log.error(f"get_logs failed: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def copy_text(self, text: str) -> dict:
+        """复制文本到剪贴板（日志查看器复制按钮使用）"""
+        try:
+            import pyperclip
+            pyperclip.copy(text or "")
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def save_file_dialog(self, default_name: str = "") -> dict:
+        """弹出保存文件对话框，返回选择的路径（取消返回空）"""
+        try:
+            import webview
+            window = self._window or (webview.windows[0] if webview.windows else None)
+            if not window:
+                return {"success": False, "error": "窗口不可用"}
+            # OPEN_DIALOG=1, SAVE_DIALOG=2; SAVE 需要 file_types
+            result = window.create_file_dialog(
+                webview.SAVE_DIALOG,
+                save_filename=default_name,
+                file_types=("ZIP files (*.zip)", "All files (*.*)")
+            )
+            if result and len(result) > 0:
+                return {"success": True, "path": result[0] if isinstance(result, (list, tuple)) else result}
+            return {"success": False, "cancelled": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def open_file_dialog(self, file_types=("ZIP files (*.zip)", "All files (*.*)")) -> dict:
+        """弹出打开文件对话框，返回选择的路径（取消返回空）"""
+        try:
+            import webview
+            window = self._window or (webview.windows[0] if webview.windows else None)
+            if not window:
+                return {"success": False, "error": "窗口不可用"}
+            result = window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=False,
+                file_types=file_types
+            )
+            if result and len(result) > 0:
+                return {"success": True, "path": result[0] if isinstance(result, (list, tuple)) else result}
+            return {"success": False, "cancelled": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    # ========== 配置备份/导出 ==========
+
+    def export_backup(self, target_path: str = "") -> dict:
+        """导出配置 + 历史记录为 zip 备份包
+
+        target_path 为空时保存到系统下载目录。
+        """
+        try:
+            import zipfile
+            from datetime import datetime
+            from app.constants import CONFIG_FILE, DATABASE_FILE
+            from pathlib import Path
+            
+            # 目标路径
+            if target_path:
+                out = Path(target_path)
+            else:
+                downloads = Path.home() / "Downloads"
+                downloads.mkdir(exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                out = downloads / f"青欣翻译备份-{stamp}.zip"
+            
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+                if CONFIG_FILE.exists():
+                    zf.write(CONFIG_FILE, "config.json")
+                if DATABASE_FILE.exists():
+                    zf.write(DATABASE_FILE, "history.db")
+            
+            log.info(f"Backup exported: {out}")
+            return {"success": True, "path": str(out)}
+        except Exception as e:
+            log.error(f"export_backup failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    def import_backup(self, file_path: str) -> dict:
+        """从 zip 备份包恢复配置 + 历史记录（先备份当前文件，重启生效）"""
+        try:
+            import zipfile
+            import shutil
+            from app.constants import CONFIG_FILE, DATABASE_FILE
+            from pathlib import Path
+            
+            src = Path(file_path)
+            if not src.exists():
+                return {"success": False, "error": "备份文件不存在"}
+            
+            # 先备份当前文件（防止恢复失败）
+            for f in (CONFIG_FILE, DATABASE_FILE):
+                if f.exists():
+                    bak = f.with_suffix(f.suffix + ".bak")
+                    try:
+                        shutil.copy2(f, bak)
+                    except Exception:
+                        pass
+            
+            restored = []
+            with zipfile.ZipFile(src, "r") as zf:
+                names = zf.namelist()
+                if "config.json" in names:
+                    with zf.open("config.json") as src_f, open(CONFIG_FILE, "wb") as dst_f:
+                        dst_f.write(src_f.read())
+                    restored.append("config.json")
+                if "history.db" in names:
+                    with zf.open("history.db") as src_f, open(DATABASE_FILE, "wb") as dst_f:
+                        dst_f.write(src_f.read())
+                    restored.append("history.db")
+            
+            # 恢复后重新加载配置
+            from app.config import config
+            config.load()
+            
+            log.info(f"Backup restored from {src}: {restored}")
+            return {"success": True, "restored": restored}
+        except Exception as e:
+            log.error(f"import_backup failed: {e}")
             return {"success": False, "error": str(e)}
     
     def translate(self, text: str) -> dict:
@@ -1467,6 +1620,210 @@ class Api:
             log.debug(f"Tray tooltip resize to {width}x{height}")
         except Exception as e:
             log.debug(f"resize_tray_tooltip failed: {e}")
+
+    # ========== 选区悬浮翻译按钮 ==========
+
+    def _find_hover_btn_hwnd(self):
+        """查找悬浮翻译按钮窗口的 Win32 句柄"""
+        try:
+            try:
+                native = getattr(self._hover_btn_window, 'native', None)
+                if native is not None:
+                    handle = getattr(native, 'Handle', None)
+                    if handle is not None:
+                        try:
+                            hwnd = handle.ToInt64()
+                        except Exception:
+                            hwnd = int(handle)
+                        if hwnd and hwnd > 0:
+                            return hwnd
+            except Exception:
+                pass
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.FindWindowW(None, "QingxinHoverBtn")
+            if hwnd:
+                return hwnd
+        except Exception:
+            return 0
+        return 0
+
+    def _win32_show_hover_btn(self, x: int, y: int) -> bool:
+        """用 Win32 API 在鼠标位置旁显示悬浮翻译按钮"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_hover_btn_hwnd()
+            if not hwnd:
+                return False
+            # 读取当前尺寸
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            w = rect.right - rect.left
+            h = rect.bottom - rect.top
+            if w <= 0 or h <= 0:
+                w, h = 70, 30
+
+            # 定位：按钮显示在鼠标右下方（选区末尾附近），超界则翻转
+            mx, my = x + 14, y + 10
+            sw = user32.GetSystemMetrics(0)
+            sh = user32.GetSystemMetrics(1)
+            if mx + w > sw:
+                mx = x - w - 14
+            if my + h > sh:
+                my = y - h - 10
+            mx = max(0, mx)
+            my = max(0, my)
+
+            # 无任务栏按钮 + 不激活 + 清除 APPWINDOW
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_NOACTIVATE = 0x08000000
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
+
+            user32.ShowWindow(hwnd, 5)   # SW_SHOW
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST
+            user32.MoveWindow(hwnd, mx, my, w, h, True)
+            log.debug(f"Hover btn shown at ({mx}, {my}) size={w}x{h}")
+            return True
+        except Exception as e:
+            log.debug(f"Win32 hover btn show failed: {e}")
+            return False
+
+    def _win32_hide_hover_btn(self) -> bool:
+        """用 Win32 API 隐藏悬浮翻译按钮"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_hover_btn_hwnd()
+            if not hwnd:
+                return False
+            user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            return True
+        except Exception as e:
+            log.debug(f"Win32 hover btn hide failed: {e}")
+            return False
+
+    def show_hover_btn(self, x: int, y: int) -> None:
+        """显示选区悬浮翻译按钮（鼠标拖选松开后由钩子调用），3 秒后自动隐藏"""
+        try:
+            if not self._hover_btn_window:
+                return
+            # 菜单/tooltip 可见时不显示（避免遮挡）
+            if self._tray_menu_visible() or self._tray_tooltip_visible:
+                return
+            self._win32_show_hover_btn(x, y)
+            self._hover_btn_visible = True
+            self._hover_btn_pos = (x, y)
+            # 3 秒后自动隐藏
+            if self._hover_btn_timer:
+                try:
+                    self._hover_btn_timer.cancel()
+                except Exception:
+                    pass
+            self._hover_btn_timer = threading.Timer(3.0, self.hide_hover_btn)
+            self._hover_btn_timer.daemon = True
+            self._hover_btn_timer.start()
+        except Exception as e:
+            log.debug(f"show_hover_btn error: {e}")
+
+    def hide_hover_btn(self) -> None:
+        """隐藏选区悬浮翻译按钮"""
+        try:
+            if self._hover_btn_timer:
+                try:
+                    self._hover_btn_timer.cancel()
+                except Exception:
+                    pass
+                self._hover_btn_timer = None
+            self._hover_btn_visible = False
+            if not self._hover_btn_window:
+                return
+            self._win32_hide_hover_btn()
+        except Exception as e:
+            log.debug(f"hide_hover_btn error: {e}")
+
+    def hover_btn_clicked(self) -> dict:
+        """悬浮翻译按钮被点击：触发划词翻译"""
+        try:
+            log.info("Hover button clicked, triggering selection translate")
+            self.hide_hover_btn()
+            # 记录按钮位置作为气泡定位锚点（按钮出现在选区末尾附近）
+            if self._hover_btn_pos:
+                self._bubble_pos = self._hover_btn_pos
+            # 触发划词翻译（自动复制选中文本 → 翻译 → 按模式显示）
+            from core.selection_translator import selection_translator
+            selection_translator.set_translate_callback(self._do_translate)
+            text = selection_translator.get_selected_text()
+            if not text:
+                self._show_selection_error("未获取到选中文本，请重新选择")
+                return {"success": False, "error": "自动复制未生效"}
+            self._show_selection_loading(text)
+            result = self._do_translate(text)
+            if result and result.get("success"):
+                self._update_selection_result(text, result.get("translation", ""))
+            elif result and not result.get("success"):
+                self._show_selection_error(result.get("error", "划词翻译失败"))
+            return result or {"success": False, "error": "翻译失败"}
+        except Exception as e:
+            log.error(f"hover_btn_clicked error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    def set_hover_button_enabled(self, enable: bool) -> dict:
+        """启用/停用选区悬浮翻译按钮（设置页即时生效）"""
+        try:
+            from core.mouse_hook import mouse_selection_hook
+            if enable:
+                if not mouse_selection_hook._running:
+                    mouse_selection_hook.start(on_select=self.show_hover_btn)
+                    log.info("Hover button enabled")
+            else:
+                mouse_selection_hook.stop()
+                self.hide_hover_btn()
+                log.info("Hover button disabled")
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def set_clipboard_monitor_enabled(self, enable: bool) -> dict:
+        """启用/停用剪贴板监听翻译（设置页即时生效）"""
+        try:
+            from core.clipboard_monitor import clipboard_monitor
+            if enable:
+                if not clipboard_monitor._running:
+                    clipboard_monitor.start(on_text=self._on_clipboard_text)
+                    log.info("Clipboard monitor enabled")
+            else:
+                clipboard_monitor.stop()
+                log.info("Clipboard monitor disabled")
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _on_clipboard_text(self, text: str):
+        """剪贴板出现新文本：自动翻译（按划词模式显示）"""
+        try:
+            log.info(f"Clipboard text detected: '{text[:40]}...' (len={len(text)})")
+            # 记录当前鼠标位置（供气泡定位）
+            self._capture_mouse_pos()
+            self._show_selection_loading(text)
+            result = self._do_translate(text)
+            if result and result.get("success"):
+                self._update_selection_result(text, result.get("translation", ""))
+            elif result and not result.get("success"):
+                self._show_selection_error(result.get("error", "自动翻译失败"))
+        except Exception as e:
+            log.error(f"Clipboard translate error: {e}", exc_info=True)
 
     def show_window_from_tray(self) -> dict:
         """托盘菜单：显示主窗口"""

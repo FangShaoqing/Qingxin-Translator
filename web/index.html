@@ -150,6 +150,24 @@
                             </div>
                         </div>
                     </div>
+                    <div class="setting-item">
+                        <span class="setting-label">选中文字后显示翻译按钮</span>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="hover-btn-toggle">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label">复制文本后自动翻译</span>
+                        <div class="setting-control">
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="clipboard-auto-toggle">
+                                <span class="slider"></span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- 快捷键设置 -->
@@ -200,14 +218,36 @@
                     </div>
                 </div>
 
-                <!-- 开发环境诊断（仅开发环境显示） -->
-                <div class="settings-card" id="dev-tools-card" style="display: none;">
-                    <h3 class="card-title">开发工具</h3>
-                    <div class="setting-item">
-                        <span class="setting-label">日志诊断</span>
-                        <div class="model-buttons">
-                            <button id="open-log" class="btn-secondary">查看日志</button>
+                <!-- 日志查看 -->
+                <div class="settings-card">
+                    <h3 class="card-title">日志</h3>
+                    <div class="setting-item" style="align-items: flex-start;">
+                        <span class="setting-label">运行日志</span>
+                        <div class="log-viewer-wrap">
+                            <div class="log-toolbar">
+                                <input type="text" id="log-search" class="setting-input" placeholder="搜索日志关键词..." style="flex:1;">
+                                <button id="log-refresh" class="btn-secondary">刷新</button>
+                                <button id="log-copy" class="btn-secondary">复制</button>
+                            </div>
+                            <div id="log-viewer" class="log-viewer"></div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- 备份与恢复 -->
+                <div class="settings-card">
+                    <h3 class="card-title">备份与恢复</h3>
+                    <div class="setting-item">
+                        <span class="setting-label">配置与历史记录</span>
+                        <div class="model-buttons">
+                            <button id="backup-btn" class="btn-secondary">导出备份</button>
+                            <button id="restore-btn" class="btn-secondary">恢复备份</button>
+                        </div>
+                    </div>
+                    <div class="setting-item">
+                        <span class="setting-label" style="font-size: 11px; color: var(--text-tertiary);">
+                            备份包含 API Key（加密存储）与历史记录；恢复后需重启应用生效
+                        </span>
                     </div>
                 </div>
             </div>

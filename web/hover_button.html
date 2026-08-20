@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QingxinHoverBtn</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            background: #FFFFFF;
+            overflow: hidden;
+            font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+        }
+
+        /* 悬浮翻译按钮：应用风格小胶囊，点击触发划词翻译 */
+        .hover-btn {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            background: #FFFFFF;
+            border: 1px solid #F0C4C8;
+            border-radius: 999px;
+            padding: 0 14px;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            animation: btnIn 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: background 0.15s ease;
+        }
+
+        .hover-btn:hover {
+            background: #FFF0F2;
+        }
+
+        .hover-btn:active {
+            background: #FADADE;
+        }
+
+        @keyframes btnIn {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .hover-btn-icon {
+            width: 13px;
+            height: 13px;
+            flex-shrink: 0;
+        }
+
+        .hover-btn-icon svg {
+            width: 13px;
+            height: 13px;
+            color: #F0C4C8;
+            stroke: #F0C4C8;
+            fill: none;
+        }
+
+        #hover-btn-text {
+            font-size: 12px;
+            color: #333333;
+            font-weight: 500;
+            white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div class="hover-btn" id="hover-btn">
+        <span class="hover-btn-icon">
+            <svg viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 5h7M4 12h7M4 19h7"/>
+                <path d="M15 4l5 16M13.5 11h7"/>
+            </svg>
+        </span>
+        <span id="hover-btn-text">翻译</span>
+    </div>
+
+    <script>
+        let _clicked = false;
+        // 点击按钮：触发划词翻译（mousedown 阻止默认行为防选中，mouseup 触发一次）
+        document.getElementById('hover-btn').addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+        document.addEventListener('mouseup', function() {
+            if (_clicked) return;
+            _clicked = true;
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.hover_btn_clicked();
+                }
+            } catch (err) {}
+        });
+    </script>
+</body>
+</html>

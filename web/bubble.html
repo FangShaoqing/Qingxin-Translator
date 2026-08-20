@@ -17,22 +17,24 @@
             font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        /* 细边框小卡片气泡：无标题栏、无原文，仅译文。
+        /* 细边框小卡片气泡：双语对照——原文（可折叠）+ 译文。
            卡片占满整个窗口；窗口四角由 Python 端 SetWindowRgn 裁剪成圆角（真正透明），
            与托盘 tooltip 一致——只留卡片，无窗口背景块 */
         .bubble {
             width: 100vw;
             height: 100vh;
             display: flex;
-            align-items: center;
+            flex-direction: column;
+            justify-content: center;
             background: #FFFFFF;
             border: 1px solid #F0C4C8;
             border-radius: 10px;
-            padding: 6px 10px;
+            padding: 8px 12px;
             user-select: text;
             -webkit-user-select: text;
             cursor: default;
             animation: popIn 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            overflow: hidden;
         }
 
         @keyframes popIn {
@@ -40,6 +42,56 @@
             to { opacity: 1; transform: scale(1); }
         }
 
+        /* 原文区（可折叠） */
+        #bubble-source {
+            font-size: 11px;
+            color: #999999;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-word;
+            width: 100%;
+            max-height: 52px;       /* 默认折叠约 3 行 */
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            -webkit-line-clamp: none;
+        }
+
+        #bubble-source.expanded {
+            max-height: none;
+        }
+
+        /* 原文展开/收起指示 */
+        #bubble-source-toggle {
+            display: none;
+            font-size: 10px;
+            color: #F0C4C8;
+            padding-top: 2px;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            flex-shrink: 0;
+            align-self: flex-start;
+        }
+
+        #bubble-source-wrap.has-more #bubble-source-toggle {
+            display: block;
+        }
+
+        /* 分隔线 */
+        .bubble-divider {
+            display: none;
+            height: 1px;
+            background: #F5E6E8;
+            margin: 6px 0;
+            flex-shrink: 0;
+        }
+
+        .bubble-divider.show {
+            display: block;
+        }
+
+        /* 译文区 */
         #bubble-translation {
             font-size: 13px;
             color: #333333;
@@ -56,46 +108,128 @@
 </head>
 <body>
     <div class="bubble">
+        <div id="bubble-source-wrap">
+            <div id="bubble-source"></div>
+            <div id="bubble-source-toggle">▲ 展开原文</div>
+        </div>
+        <div class="bubble-divider" id="bubble-divider"></div>
         <div id="bubble-translation">翻译中...</div>
     </div>
 
     <script>
-        // 由 Python 端 evaluate_js 调用，设置气泡内容
+        let _sourceExpanded = false;
+        let _hasSource = false;
+
+        // 由 Python 端 evaluate_js 调用，设置气泡内容（原文 + 译文）
         window.__setBubbleContent = function(sourceText, translation) {
-            const el = document.getElementById('bubble-translation');
-            el.textContent = translation;
-            el.className = '';
+            const sourceEl = document.getElementById('bubble-source');
+            const transEl = document.getElementById('bubble-translation');
+            const toggleEl = document.getElementById('bubble-source-toggle');
+            const divider = document.getElementById('bubble-divider');
+            
+            _hasSource = !!(sourceText && sourceText.trim());
+            if (_hasSource) {
+                sourceEl.textContent = sourceText;
+                transEl.textContent = translation;
+                transEl.className = '';
+                // 原文超 3 行才显示"展开"指示
+                const wrap = document.getElementById('bubble-source-wrap');
+                if (sourceEl.scrollHeight > sourceEl.clientHeight + 4) {
+                    wrap.classList.add('has-more');
+                } else {
+                    wrap.classList.remove('has-more');
+                }
+                divider.classList.add('show');
+            } else {
+                sourceEl.textContent = '';
+                transEl.textContent = translation;
+                transEl.className = '';
+                document.getElementById('bubble-source-wrap').classList.remove('has-more');
+                divider.classList.remove('show');
+            }
+            _sourceExpanded = false;
+            sourceEl.classList.remove('expanded');
+            updateToggleLabel();
             fitBubbleHeight();
         };
 
         window.__setBubbleError = function(message) {
-            const el = document.getElementById('bubble-translation');
-            el.textContent = message;
-            el.className = 'bubble-error';
+            const sourceEl = document.getElementById('bubble-source');
+            const transEl = document.getElementById('bubble-translation');
+            // 错误时隐藏原文区，只显示错误信息
+            sourceEl.textContent = '';
+            document.getElementById('bubble-source-wrap').classList.remove('has-more');
+            document.getElementById('bubble-divider').classList.remove('show');
+            transEl.textContent = message;
+            transEl.className = 'bubble-error';
+            _hasSource = false;
             fitBubbleHeight();
         };
 
-        // 根据译文长度自适应气泡尺寸（宽度和高度都跟随内容）
+        function updateToggleLabel() {
+            const toggleEl = document.getElementById('bubble-source-toggle');
+            toggleEl.textContent = _sourceExpanded ? '▼ 收起原文' : '▲ 展开原文';
+        }
+
+        // 点击原文区切换展开/收起
+        document.getElementById('bubble-source-wrap').addEventListener('click', function(e) {
+            if (!_hasSource) return;
+            const wrap = document.getElementById('bubble-source-wrap');
+            if (!wrap.classList.contains('has-more')) return;  // 无更多内容不响应
+            _sourceExpanded = !_sourceExpanded;
+            document.getElementById('bubble-source').classList.toggle('expanded', _sourceExpanded);
+            updateToggleLabel();
+            fitBubbleHeight();
+        });
+
+        // 根据内容自适应气泡尺寸（宽度和高度都跟随内容）
         function fitBubbleHeight() {
             try {
                 if (!window.pywebview || !window.pywebview.api) return;
                 const translation = document.getElementById('bubble-translation');
+                const sourceEl = document.getElementById('bubble-source');
                 
                 // 测量译文文本自然宽度（canvas 估算，与 CSS 字号一致）
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
                 ctx.font = '13px "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif';
-                const textWidth = ctx.measureText(translation.textContent).width;
+                const transW = ctx.measureText(translation.textContent).width;
+                // 原文宽度可能更长（原文可能比译文长）
+                ctx.font = '11px "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif';
+                const sourceW = _hasSource ? ctx.measureText(sourceEl.textContent).width : 0;
+                const textWidth = Math.max(transW, sourceW);
                 
-                // 气泡宽度 = 文本宽度 + padding(20) + 边框(2)，限制 120~400
-                const width = Math.max(120, Math.min(Math.ceil(textWidth) + 24, 400));
+                // 气泡宽度 = 文本宽度 + padding(24) + 边框(2)，限制 120~400
+                const width = Math.max(120, Math.min(Math.ceil(textWidth) + 26, 400));
                 
                 // 按目标宽度设置内容宽度，测量实际换行后的高度
-                const contentWidth = width - 2 - 20;  // border + padding
+                const contentWidth = width - 2 - 24;  // border + padding
                 translation.style.width = contentWidth + 'px';
+                sourceEl.style.width = contentWidth + 'px';
+                
+                // 临时禁用折叠限制测量完整高度（展开态）
+                const wasExpanded = sourceEl.classList.contains('expanded');
+                sourceEl.classList.add('expanded');
+                const sourceH = _hasSource ? sourceEl.scrollHeight : 0;
+                if (!wasExpanded) sourceEl.classList.remove('expanded');
+                
                 const transH = translation.scrollHeight;
-                // 高度 = 译文 + padding(12) + 边框(2)
-                const height = Math.max(42, Math.min(transH + 18, 268));
+                const toggleH = 16;  // 展开指示行高度
+                const dividerH = (_hasSource ? 13 : 0);  // 分隔线 + margin
+                const padding = 16;   // 上下 padding 8+8
+                const border = 2;
+                
+                // 高度 = 原文(折叠限高或展开全高) + 指示 + 分隔线 + 译文 + padding + 边框
+                let sourceDisplayH;
+                if (_hasSource) {
+                    sourceDisplayH = wasExpanded ? sourceH : Math.min(sourceH, 52);  // 折叠 3 行
+                } else {
+                    sourceDisplayH = 0;
+                }
+                let height = sourceDisplayH + (sourceDisplayH > 0 ? toggleH : 0) + dividerH + transH + padding + border;
+                
+                // 上下限（保留原有范围）
+                height = Math.max(42, Math.min(height, 320));
                 
                 window.pywebview.api.resize_bubble(width, Math.round(height));
             } catch (e) {}

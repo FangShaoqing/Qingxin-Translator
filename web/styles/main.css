@@ -173,6 +173,38 @@ body {
     position: relative;   /* update-bar 悬浮定位的锚点 */
 }
 
+/* Log Viewer */
+.log-viewer-wrap {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.log-toolbar {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.log-viewer {
+    height: 200px;
+    overflow-y: auto;
+    background: #FAFAFA;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 10px;
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
 /* Update Bar（悬浮小提示条：贴在输入框右上角，不占布局空间，避免挤压输入框） */
 .update-bar {
     position: absolute;

@@ -477,6 +477,20 @@ def _quit_app():
     except Exception:
         pass
     
+    # 停止鼠标拖选钩子
+    try:
+        from core.mouse_hook import mouse_selection_hook
+        mouse_selection_hook.stop()
+    except Exception:
+        pass
+    
+    # 停止剪贴板监听
+    try:
+        from core.clipboard_monitor import clipboard_monitor
+        clipboard_monitor.stop()
+    except Exception:
+        pass
+    
     # 销毁所有窗口（pywebview 需全部窗口关闭后才退出事件循环）
     # 注意：必须先销毁气泡和托盘菜单窗口，否则事件循环永不退出
     try:
@@ -499,6 +513,12 @@ def _quit_app():
                 log.info("Tray tooltip window destroyed")
             except Exception as e:
                 log.warning(f"Tray tooltip destroy failed: {e}")
+        if api_instance._hover_btn_window:
+            try:
+                api_instance._hover_btn_window.destroy()
+                log.info("Hover button window destroyed")
+            except Exception as e:
+                log.warning(f"Hover button destroy failed: {e}")
     except Exception:
         pass
     
@@ -824,6 +844,45 @@ def main():
     except Exception as e:
         log.warning(f"Failed to create tray tooltip window: {e}")
     
+    # 创建选区悬浮翻译按钮窗口（拖选文本后出现在选区旁，点击即翻译）
+    try:
+        hover_btn_win = webview.create_window(
+            title="QingxinHoverBtn",
+            url=str(ROOT_DIR / "web" / "hover_button.html") + "?v=1",
+            width=70,
+            height=30,
+            min_size=(1, 1),
+            frameless=True,
+            on_top=True,
+            draggable=False,
+            easy_drag=False,
+            text_select=False,
+            x=-10000,
+            y=-10000,
+            background_color="#FFFFFF",
+            js_api=api
+        )
+        api.set_hover_btn_window(hover_btn_win)
+        # 创建后立即隐藏（Win32）
+        try:
+            api.hide_hover_btn()
+        except Exception:
+            pass
+        
+        def _on_hover_btn_closing():
+            global _real_quit
+            if _real_quit:
+                return True
+            try:
+                hover_btn_win.hide()
+            except Exception:
+                pass
+            return False
+        hover_btn_win.events.closing += _on_hover_btn_closing
+        log.info("Hover button window created (hidden)")
+    except Exception as e:
+        log.warning(f"Failed to create hover button window: {e}")
+    
     # 注册窗口关闭事件（处理 Alt+F4 等 OS 级关闭）
     window.events.closing += _on_closing
     
@@ -837,6 +896,7 @@ def main():
             api_instance.hide_bubble()
             api_instance.hide_tray_tooltip()
             api_instance.hide_tray_menu()
+            api_instance.hide_hover_btn()
         except Exception:
             pass
         
@@ -850,6 +910,7 @@ def main():
             api_instance.hide_bubble()
             api_instance.hide_tray_tooltip()
             api_instance.hide_tray_menu()
+            api_instance.hide_hover_btn()
         except Exception:
             pass
         
@@ -858,6 +919,30 @@ def main():
         
         # 设置系统托盘
         _setup_tray(window)
+        
+        # 启动鼠标拖选钩子（选区悬浮翻译按钮，配置开关控制）
+        try:
+            if config.get("selection_hover_button", True):
+                from core.mouse_hook import mouse_selection_hook
+                from api import api as api_instance
+                mouse_selection_hook.start(on_select=api_instance.show_hover_btn)
+                log.info("Mouse selection hook started (hover button)")
+            else:
+                log.info("Hover button disabled by config")
+        except Exception as e:
+            log.warning(f"Mouse selection hook failed: {e}")
+        
+        # 启动剪贴板监听（复制即翻译，配置开关控制，默认关闭）
+        try:
+            if config.get("clipboard_auto_translate", False):
+                from core.clipboard_monitor import clipboard_monitor
+                from api import api as api_instance
+                clipboard_monitor.start(on_text=api_instance._on_clipboard_text)
+                log.info("Clipboard monitor started (auto translate)")
+            else:
+                log.info("Clipboard monitor disabled by config")
+        except Exception as e:
+            log.warning(f"Clipboard monitor failed: {e}")
         
         log.info("All components initialized")
     

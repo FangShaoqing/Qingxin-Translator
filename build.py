@@ -1,6 +1,10 @@
 """
 Qingxin Translator - PyInstaller Configuration
 打包配置文件
+
+用法：
+    python build.py                     # 默认 onefile（便携单文件，根目录发布用）
+    python build.py --mode onedir       # onedir（目录模式，启动快，安装版用）
 """
 
 import sys
@@ -8,6 +12,16 @@ from pathlib import Path
 
 # 项目根目录
 ROOT_DIR = Path('.').resolve()
+
+# 打包模式：onefile（单文件） / onedir（目录）
+MODE = "onefile"
+if "--mode" in sys.argv:
+    idx = sys.argv.index("--mode")
+    if idx + 1 < len(sys.argv):
+        MODE = sys.argv[idx + 1].lower()
+        if MODE not in ("onefile", "onedir"):
+            print(f"Unknown mode: {MODE}, use onefile or onedir")
+            sys.exit(1)
 
 # PyInstaller配置
 config = {
@@ -17,8 +31,8 @@ config = {
     # 程序名称
     'name': 'QingxinTranslator',
     
-    # 打包成单文件（--onefile）
-    'onefile': True,
+    # 打包模式（onefile 单文件 / onedir 目录）
+    'onefile': MODE == "onefile",
     
     # 是否显示控制台（调试时设为True）
     'console': False,
@@ -97,6 +111,6 @@ if __name__ == '__main__':
     import PyInstaller.__main__
     
     args = get_pyinstaller_args()
-    print(f"PyInstaller args: {args}")
+    print(f"PyInstaller args (mode={MODE}): {args}")
     
     PyInstaller.__main__.run(args)

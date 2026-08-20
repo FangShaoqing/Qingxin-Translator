@@ -52,6 +52,8 @@ DEFAULT_CONFIG = {
     # 划词翻译
     "selection_translate_hotkey": "Ctrl+Alt+X",  # 划词翻译快捷键
     "selection_display_mode": "bubble",          # 划词翻译结果展示：bubble气泡 / window窗口
+    "selection_hover_button": True,              # 拖选文本后显示悬浮翻译按钮
+    "clipboard_auto_translate": False,           # 复制文本后自动翻译（剪贴板监听）
 }
 
 
@@ -118,10 +120,45 @@ class Config:
         valid_engines = {"online"}
         if self.data.get("engine") not in valid_engines:
             self.data["engine"] = "online"
+        
+        # 兼容迁移：旧版明文 api_key → 加密存储
+        self._migrate_api_key()
+    
+    def _migrate_api_key(self):
+        """旧版明文 api_key 自动迁移为加密存储（api_key_enc）"""
+        try:
+            plain = self.data.get("api_key", "")
+            # 加密字段存在则无需迁移（优先使用加密值）
+            if self.data.get("api_key_enc"):
+                # 清理残留明文
+                if plain:
+                    self.data["api_key"] = ""
+                return
+            if plain:
+                from core.secret import encrypt
+                enc = encrypt(plain)
+                if enc:
+                    self.data["api_key_enc"] = enc
+                    self.data["api_key"] = ""
+                    try:
+                        self.save()
+                        print("API key migrated to encrypted storage")
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Warning: API key migration failed: {e}")
     
     def save(self) -> None:
-        """保存配置到文件"""
+        """保存配置到文件（api_key 加密存储）"""
         try:
+            # 保存前把明文 api_key 加密，磁盘上不保留明文
+            plain = self.data.get("api_key", "")
+            if plain:
+                from core.secret import encrypt
+                enc = encrypt(plain)
+                if enc:
+                    self.data["api_key_enc"] = enc
+                    self.data["api_key"] = ""
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
             self._notify_listeners()
@@ -129,11 +166,24 @@ class Config:
             print(f"Warning: Failed to save config: {e}")
     
     def get(self, key: str, default: Any = None) -> Any:
-        """获取配置值"""
+        """获取配置值（api_key 解密返回明文）"""
+        if key == "api_key":
+            # 优先明文（未加密场景），否则解密 api_key_enc
+            plain = self.data.get("api_key", "")
+            if plain:
+                return plain
+            enc = self.data.get("api_key_enc", "")
+            if enc:
+                from core.secret import decrypt
+                dec = decrypt(enc)
+                if dec is not None:
+                    return dec
+                return ""  # 跨机器无法解密 → 返回空，提示重新输入
+            return default
         return self.data.get(key, default)
     
     def set(self, key: str, value: Any) -> None:
-        """设置配置值"""
+        """设置配置值（api_key 保存时加密）"""
         self.data[key] = value
         self.save()
     

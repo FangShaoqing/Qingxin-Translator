@@ -726,6 +726,12 @@ async function loadSettings() {
         // 划词翻译窗口样式
         updateSelectionModeHighlight(settings.selection_display_mode || 'bubble');
         
+        // 悬浮翻译按钮 / 剪贴板自动翻译
+        const hoverToggle = document.getElementById('hover-btn-toggle');
+        if (hoverToggle) hoverToggle.checked = settings.selection_hover_button !== false;
+        const clipboardToggle = document.getElementById('clipboard-auto-toggle');
+        if (clipboardToggle) clipboardToggle.checked = settings.clipboard_auto_translate === true;
+        
         // 译文质量模式：始终默认直译（不恢复上次保存的模式）
         _currentTranslateMode = 'literal';
         updateTranslateModeHighlight();
@@ -983,6 +989,25 @@ function bindEvents() {
         input.addEventListener('change', () => saveSettings(false));
     });
     
+    // 选中文字后显示翻译按钮（即时启停鼠标钩子）
+    const hoverToggle = document.getElementById('hover-btn-toggle');
+    if (hoverToggle) {
+        hoverToggle.addEventListener('change', async (e) => {
+            const enable = e.target.checked;
+            await callApi('save_settings', { selection_hover_button: enable });
+            await callApi('set_hover_button_enabled', enable);
+        });
+    }
+    // 复制文本后自动翻译（即时启停剪贴板监听）
+    const clipboardToggle = document.getElementById('clipboard-auto-toggle');
+    if (clipboardToggle) {
+        clipboardToggle.addEventListener('change', async (e) => {
+            const enable = e.target.checked;
+            await callApi('save_settings', { clipboard_auto_translate: enable });
+            await callApi('set_clipboard_monitor_enabled', enable);
+        });
+    }
+    
     // 开机自启动（单独处理，需要操作注册表）
     elements.launchAtStartup.addEventListener('change', async (e) => {
         const enable = e.target.checked;
@@ -1194,16 +1219,84 @@ window.__onUpdateDownloadFailed = function(errorMsg) {
     showToast('下载失败: ' + errorMsg, 'error');
 };
 
-// ========== 开发环境诊断 ==========
+// ========== 应用内日志查看器 ==========
 
-async function openLogFile() {
+let _logKeyword = '';
+
+async function loadLogs() {
+    const viewer = document.getElementById('log-viewer');
+    if (!viewer) return;
     try {
-        const result = await callApi('open_log_file');
-        if (!result.success) {
-            showToast(result.error || '无法打开日志', 'error');
+        const result = await callApi('get_logs', 300, _logKeyword);
+        if (result.success) {
+            viewer.textContent = result.lines.length ? result.lines.join('\n') : '（无日志）';
+            viewer.scrollTop = viewer.scrollHeight;
+        } else {
+            viewer.textContent = '加载日志失败: ' + (result.error || '');
         }
     } catch (e) {
-        showToast('无法打开日志', 'error');
+        viewer.textContent = '加载日志失败';
+    }
+}
+
+function copyLogs() {
+    const viewer = document.getElementById('log-viewer');
+    if (!viewer) return;
+    const text = viewer.textContent || '';
+    if (!text) return;
+    try {
+        if (window.pywebview && window.pywebview.api) {
+            window.pywebview.api.copy_text(text).then((r) => {
+                showToast(r && r.success ? '日志已复制' : '复制失败', r && r.success ? 'success' : 'error');
+            });
+        } else {
+            showToast('复制失败', 'error');
+        }
+    } catch (e) {
+        showToast('复制失败', 'error');
+    }
+}
+
+// ========== 备份与恢复 ==========
+
+async function exportBackup() {
+    try {
+        // 选择保存位置
+        const dlg = await callApi('save_file_dialog', '青欣翻译备份.zip');
+        if (!dlg.success) {
+            if (dlg.cancelled) return;
+            showToast('打开保存对话框失败', 'error');
+            return;
+        }
+        const result = await callApi('export_backup', dlg.path);
+        if (result.success) {
+            showToast('备份已导出: ' + result.path, 'success');
+        } else {
+            showToast('导出失败: ' + (result.error || ''), 'error');
+        }
+    } catch (e) {
+        showToast('导出失败', 'error');
+    }
+}
+
+async function restoreBackup() {
+    try {
+        const dlg = await callApi('open_file_dialog');
+        if (!dlg.success) {
+            if (dlg.cancelled) return;
+            showToast('打开文件对话框失败', 'error');
+            return;
+        }
+        const ok = await showConfirm('恢复备份将覆盖当前配置和历史记录（当前文件会先备份为 .bak），并需重启应用生效。继续？', '恢复备份');
+        if (!ok) return;
+        const result = await callApi('import_backup', dlg.path);
+        if (result.success) {
+            showToast('备份已恢复，请重启应用生效', 'success');
+        } else {
+            showToast('恢复失败: ' + (result.error || ''), 'error');
+        }
+    } catch (e) {
+        showToast('恢复失败', 'error');
     }
 }
 
@@ -1218,18 +1311,28 @@ async function init() {
         initDrag();
         loadSettings();
         
-        // 检查是否为开发环境（显示开发工具卡片）
-        try {
-            const appInfo = await callApi('get_app_info');
-            if (appInfo && appInfo.is_dev) {
-                const devCard = document.getElementById('dev-tools-card');
-                if (devCard) devCard.style.display = '';
-                const openLogBtn = document.getElementById('open-log');
-                if (openLogBtn) openLogBtn.addEventListener('click', openLogFile);
-            }
-        } catch (e) {
-            // 开发工具检查失败不影响正常功能
+        // 日志查看器事件绑定
+        const logRefresh = document.getElementById('log-refresh');
+        const logCopy = document.getElementById('log-copy');
+        const logSearch = document.getElementById('log-search');
+        if (logRefresh) logRefresh.addEventListener('click', loadLogs);
+        if (logCopy) logCopy.addEventListener('click', copyLogs);
+        if (logSearch) {
+            let logSearchTimer;
+            logSearch.addEventListener('input', () => {
+                clearTimeout(logSearchTimer);
+                logSearchTimer = setTimeout(() => {
+                    _logKeyword = logSearch.value.trim();
+                    loadLogs();
+                }, 400);
+            });
         }
+        
+        // 备份/恢复按钮
+        const backupBtn = document.getElementById('backup-btn');
+        const restoreBtn = document.getElementById('restore-btn');
+        if (backupBtn) backupBtn.addEventListener('click', exportBackup);
+        if (restoreBtn) restoreBtn.addEventListener('click', restoreBackup);
         
         // 延迟调整窗口大小，确保 DOM 已完全渲染
         requestAnimationFrame(() => {
