@@ -41,9 +41,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "startupicon"; Description: "Launch at Windows startup"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [Files]
-; 主程序（onedir 模式：整个目录递归安装；onefile 模式：仅 exe）
+; 主程序（onedir 模式：整个目录递归安装，含 exe 与 _internal）
 Source: "dist\QingxinTranslator\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; 默认配置文件（安装到 {app}\data\config.json）
 Source: "data\config.json"; DestDir: "{app}\data"; Flags: ignoreversion
 

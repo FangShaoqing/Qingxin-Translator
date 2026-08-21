@@ -118,10 +118,15 @@ def run_installer(installer_path: str):
 
     关键：用 /DIR= 指定安装到【当前应用所在目录】，覆盖原程序，
     而不是 Inno Setup 的默认安装位置（{autopf}）。
+
+    注意：/DIR 值【不要手动加引号】——路径含空格时 subprocess.Popen
+    会自动按 Windows 命令行规则引用整个参数；手动加引号会被
+    list2cmdline 转义成嵌套引号（"/DIR=\\"...\\""），Inno Setup 解析
+    失败导致安装程序静默退出、什么都不装（v0.3.0 实测翻车）。
     """
     try:
         p = str(installer_path)
-        args = SILENT_ARGS + [f'/DIR="{_get_install_dir()}"']
+        args = SILENT_ARGS + [f'/DIR={_get_install_dir()}']
         log.info(f"Launching installer: {p} {' '.join(args)}")
         subprocess.Popen(
             [p] + args,
