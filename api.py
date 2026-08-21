@@ -1449,7 +1449,9 @@ class Api:
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             w = rect.right - rect.left
             h = rect.bottom - rect.top
-            if w <= 0 or h <= 0:
+            # 兜底：离屏/未渲染时 WebView2 可能报告 1px 高布局（或 0），
+            # 用 1px 计算定位会整体偏低 31px（1 vs 32）；统一按实际内容高度兜底
+            if h <= 0 or h < 10:
                 w, h = 150, 32
 
             # 定位：以鼠标位置为基准，tooltip 显示在鼠标上方（原生 tooltip 行为）。
