@@ -1787,6 +1787,24 @@ class Api:
             deadline = _t.time() + 2.0
             while not getattr(self, "_hover_btn_ready", False) and _t.time() < deadline:
                 _t.sleep(0.05)
+            # 页面未就绪（WebView2 加载失败/卡住）：重新导航页面再等一次——
+            # 避免显示空白按钮（内容不渲染且点击无反应）
+            if not getattr(self, "_hover_btn_ready", False):
+                try:
+                    _url = getattr(self._hover_btn_window, "url", None)
+                    if _url:
+                        self._hover_btn_window.load_url(_url)
+                    else:
+                        self._hover_btn_window.evaluate_js("location.reload()")
+                    log.warning("Hover btn page not ready, reloading...")
+                except Exception:
+                    pass
+                deadline = _t.time() + 3.0
+                while not getattr(self, "_hover_btn_ready", False) and _t.time() < deadline:
+                    _t.sleep(0.05)
+            if not getattr(self, "_hover_btn_ready", False):
+                log.warning("Hover btn page failed to load, skip showing")
+                return
             # 关键：用 pywebview 的 resize() 强制 WebView2 重新布局——
             # 窗口在屏幕外创建时为 1px 高，内容按 1px 布局；仅 MoveWindow 不会触发
             # WebView2 控件重排，导致"窗口正常但内容扁"。
