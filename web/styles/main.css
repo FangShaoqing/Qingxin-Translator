@@ -1128,6 +1128,7 @@ input:checked + .slider:before {
     font-size: 13px;
     color: var(--text-secondary);
     line-height: 1.5;
+    white-space: pre-line;  /* 保留 \n 换行（如安装更新的逐项说明） */
 }
 
 .modal-actions {

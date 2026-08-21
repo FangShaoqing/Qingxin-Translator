@@ -93,7 +93,7 @@ function showToast(message, type = 'info', duration = 3000) {
 }
 
 // 自定义确认弹窗（替代原生 confirm）
-function showConfirm(message, title = '确认操作') {
+function showConfirm(message, title = '确认操作', okText = '确定', cancelText = '取消') {
     return new Promise((resolve) => {
         const overlay = document.getElementById('confirm-modal');
         const titleEl = document.getElementById('confirm-title');
@@ -103,6 +103,8 @@ function showConfirm(message, title = '确认操作') {
         
         titleEl.textContent = title;
         messageEl.textContent = message;
+        okBtn.textContent = okText;
+        cancelBtn.textContent = cancelText;
         overlay.classList.add('show');
         
         // 弹窗可能超出主窗口高度（如安装更新确认）：显示时临时加高主窗口，关闭后恢复
@@ -1204,10 +1206,12 @@ window.__onUpdateDownloaded = function(installerPath) {
     if (bar) bar.classList.add('hidden');
     showToast('更新下载完成', 'success');
     
-    // 弹窗询问：立即安装 or 稍后安装
+    // 弹窗询问：立即安装 or 稍后安装（各占一行；按钮文字与操作一一对应）
     showConfirm(
-        '更新已下载完成，是否立即安装？\n\n立即安装：退出应用并开始安装。\n稍后安装：下次退出应用时自动安装。',
-        '安装更新'
+        '更新已下载完成，是否立即安装？\n立即安装：退出应用并开始安装。\n稍后安装：下次退出应用时自动安装。',
+        '安装更新',
+        '立即安装',
+        '稍后安装'
     ).then((ok) => {
         if (ok) {
             // 立即安装
