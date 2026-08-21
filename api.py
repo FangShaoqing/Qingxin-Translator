@@ -623,7 +623,10 @@ class Api:
             return {"success": False, "error": str(e)}
     
     def get_logs(self, count: int = 300, keyword: str = "") -> dict:
-        """获取日志尾部内容（应用内日志查看器使用，正式版可用）"""
+        """获取日志尾部内容（应用内日志查看器使用，仅开发环境——正式版不暴露诊断功能）"""
+        import sys
+        if getattr(sys, 'frozen', False):
+            return {"success": False, "error": "开发环境专用功能"}
         try:
             from core.logger import log
             log_file = log.get_log_file()

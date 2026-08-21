@@ -1333,6 +1333,15 @@ async function init() {
         initDrag();
         loadSettings();
         
+        // 日志查看器仅开发环境显示（正式版隐藏诊断功能）
+        try {
+            const appInfo = await callApi('get_app_info');
+            if (appInfo && appInfo.is_dev === false) {
+                const logCard = document.getElementById('log-card');
+                if (logCard) logCard.style.display = 'none';
+            }
+        } catch (e) {}
+        
         // 日志查看器事件绑定
         const logRefresh = document.getElementById('log-refresh');
         const logCopy = document.getElementById('log-copy');
