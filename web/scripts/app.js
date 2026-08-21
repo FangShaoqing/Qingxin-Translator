@@ -105,11 +105,29 @@ function showConfirm(message, title = '确认操作') {
         messageEl.textContent = message;
         overlay.classList.add('show');
         
+        // 弹窗可能超出主窗口高度（如安装更新确认）：显示时临时加高主窗口，关闭后恢复
+        const prevWinH = window.innerHeight;
+        const dialog = overlay.querySelector('.modal-dialog');
+        setTimeout(() => {
+            try {
+                const need = (dialog ? dialog.offsetHeight : 0) + 24;
+                if (need > prevWinH && window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.resize(520, Math.min(need + 20, 640));
+                }
+            } catch (e) {}
+        }, 60);
+        
         // 聚焦确定按钮
         setTimeout(() => okBtn.focus(), 100);
         
         function cleanup() {
             overlay.classList.remove('show');
+            // 恢复主窗口高度（弹窗超出时加高过）
+            try {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.resize(520, prevWinH);
+                }
+            } catch (e) {}
             cancelBtn.removeEventListener('click', onCancel);
             okBtn.removeEventListener('click', onOk);
             overlay.removeEventListener('click', onOverlay);
