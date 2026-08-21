@@ -216,8 +216,18 @@ class Config:
                 print(f"Warning: Config listener error: {e}")
     
     def to_dict(self) -> dict:
-        """导出配置为字典"""
-        return self.data.copy()
+        """导出配置为字典（api_key 解密返回明文，供前端展示/API 使用）"""
+        d = self.data.copy()
+        # api_key 字段返回解密明文（内存态），不暴露 api_key_enc
+        plain = d.get("api_key", "")
+        if not plain:
+            enc = d.get("api_key_enc", "")
+            if enc:
+                from core.secret import decrypt
+                dec = decrypt(enc)
+                d["api_key"] = dec if dec is not None else ""
+        d.pop("api_key_enc", None)
+        return d
     
     def __repr__(self) -> str:
         return f"Config({self.config_path})"

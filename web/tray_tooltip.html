@@ -12,13 +12,13 @@
         }
 
         html, body {
-            background: transparent;
+            background: #FFFFFF;
             overflow: hidden;
             font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
         /* 与应用整体风格一致的小卡片 tooltip */
-        /* 卡片占满整个窗口；窗口四角由 Python 端 SetWindowRgn 裁剪成圆角（真正透明） */
+        /* 卡片占满整个窗口；窗口为普通窗口 + Win11 系统圆角（四角真透明露桌面） */
         .tooltip {
             width: 100vw;
             height: 100vh;

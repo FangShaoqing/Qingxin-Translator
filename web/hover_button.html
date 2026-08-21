@@ -14,21 +14,24 @@
         html, body {
             background: #FFFFFF;
             overflow: hidden;
+            width: 100%;
+            height: 100%;
             font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        /* 悬浮翻译按钮：应用风格小胶囊，点击触发划词翻译 */
+        /* 悬浮翻译按钮：占满窗口（72x28）。普通窗口 + Win11 系统圆角
+           （四角真透明露桌面）；系统圆角自带的淡投影跟随系统主题。 */
         .hover-btn {
-            width: 100vw;
-            height: 100vh;
+            width: 100%;
+            height: 100%;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 5px;
+            gap: 6px;
             background: #FFFFFF;
-            border: 1px solid #F0C4C8;
-            border-radius: 999px;
-            padding: 0 14px;
+            border: 1px solid #E8A0A6;
+            border-radius: 8px;
+            padding: 0 10px;
             cursor: pointer;
             user-select: none;
             -webkit-user-select: none;
@@ -37,7 +40,7 @@
         }
 
         .hover-btn:hover {
-            background: #FFF0F2;
+            background: #FFF5F6;
         }
 
         .hover-btn:active {
@@ -49,24 +52,31 @@
             to { opacity: 1; transform: scale(1); }
         }
 
+        /* 图标容器：flex 居中，防止 SVG 基线偏移 */
         .hover-btn-icon {
-            width: 13px;
-            height: 13px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
             flex-shrink: 0;
         }
 
         .hover-btn-icon svg {
-            width: 13px;
-            height: 13px;
-            color: #F0C4C8;
-            stroke: #F0C4C8;
+            display: block;
+            width: 14px;
+            height: 14px;
+            color: #E8A0A6;
+            stroke: #E8A0A6;
             fill: none;
         }
 
         #hover-btn-text {
             font-size: 12px;
-            color: #333333;
-            font-weight: 500;
+            line-height: 1;
+            color: #555555;
+            font-weight: 600;
+            letter-spacing: 0.5px;
             white-space: nowrap;
         }
     </style>
@@ -75,29 +85,42 @@
     <div class="hover-btn" id="hover-btn">
         <span class="hover-btn-icon">
             <svg viewBox="0 0 24 24" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M4 5h7M4 12h7M4 19h7"/>
-                <path d="M15 4l5 16M13.5 11h7"/>
+                <path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/>
+                <path d="M8.5 10h7M8.5 13.5h4.5"/>
             </svg>
         </span>
         <span id="hover-btn-text">翻译</span>
     </div>
 
     <script>
-        let _clicked = false;
+        let _lastClickTs = 0;
         // 点击按钮：触发划词翻译（mousedown 阻止默认行为防选中，mouseup 触发一次）
+        // 注意：按钮窗口复用（hide/show 不重载页面），不能使用永久标志——
+        // 用时间戳防抖保证每次显示后的点击都能触发
         document.getElementById('hover-btn').addEventListener('mousedown', function(e) {
             e.preventDefault();
             e.stopPropagation();
         });
         document.addEventListener('mouseup', function() {
-            if (_clicked) return;
-            _clicked = true;
+            const now = Date.now();
+            if (now - _lastClickTs < 300) return;  // 防抖：300ms 内不重复触发
+            _lastClickTs = now;
             try {
                 if (window.pywebview && window.pywebview.api) {
                     window.pywebview.api.hover_btn_clicked();
                 }
             } catch (err) {}
         });
+
+        // 兼容接口：窗口尺寸由 Python 端固定（72x28），无需 JS 测量
+        function fitHoverBtn() {
+            // 无操作（保留供 Python 端调用）
+        }
+
+        window.addEventListener('DOMContentLoaded', function() { fitHoverBtn(); });
+        if (document.readyState !== 'loading') {
+            fitHoverBtn();
+        }
     </script>
 </body>
 </html>

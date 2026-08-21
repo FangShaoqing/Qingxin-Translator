@@ -52,6 +52,7 @@ class MouseSelectionHook:
         self._pressed = False
         self._press_x = 0
         self._press_y = 0
+        self._press_caption = False  # 按下点是否在窗口标题栏（拖动窗口）
 
         # 回调对象必须保持引用（否则被 GC 后钩子崩溃）
         self._callback = HOOKPROC(self._hook_proc)
@@ -64,6 +65,9 @@ class MouseSelectionHook:
                     self._pressed = True
                     self._press_x = data.pt.x
                     self._press_y = data.pt.y
+                    # 记录按下点是否在窗口标题栏（非客户区 HTCAPTION）：
+                    # 若是 → 这是"拖动窗口"而非"选中文本"，松开时不触发
+                    self._press_caption = self._is_on_title_bar(data.pt.x, data.pt.y)
                 elif w_param == WM_MOUSEMOVE:
                     pass  # 可扩展：按下期间检测移动
                 elif w_param == WM_LBUTTONUP:
@@ -73,6 +77,12 @@ class MouseSelectionHook:
                         dy = data.pt.y - self._press_y
                         dist = (dx * dx + dy * dy) ** 0.5
                         self._pressed = False
+                        # 拖动窗口（标题栏按下）不触发
+                        if self._press_caption:
+                            self._press_caption = False
+                            return ctypes.windll.user32.CallNextHookEx(
+                                self._hook, n_code, w_param, ctypes.c_void_p(l_param)
+                            )
                         # 拖选阈值：移动距离 > 10px 视为选中操作
                         if dist > 10:
                             if self._on_select:
@@ -86,6 +96,27 @@ class MouseSelectionHook:
         return ctypes.windll.user32.CallNextHookEx(
             self._hook, n_code, w_param, ctypes.c_void_p(l_param)
         )
+
+    def _is_on_title_bar(self, x: int, y: int) -> bool:
+        """判断屏幕坐标 (x, y) 是否落在窗口标题栏（非客户区 HTCAPTION）"""
+        try:
+            import ctypes as _c
+            from ctypes import wintypes as _wt
+            user32 = _c.windll.user32
+            class POINT(_c.Structure):
+                _fields_ = [("x", _wt.LONG), ("y", _wt.LONG)]
+            pt = POINT(x, y)
+            hwnd = user32.WindowFromPoint(pt)
+            if not hwnd:
+                return False
+            # WM_NCHITTEST (0x0084)：lParam = 屏幕坐标打包 (y<<16)|x
+            WM_NCHITTEST = 0x0084
+            HTCAPTION = 2
+            lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+            result = user32.SendMessageW(hwnd, WM_NCHITTEST, 0, lparam)
+            return result == HTCAPTION
+        except Exception:
+            return False
 
     def start(self, on_select: Callable) -> bool:
         """启动鼠标钩子（在独立线程中运行消息循环）"""

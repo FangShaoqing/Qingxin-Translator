@@ -654,8 +654,57 @@ def _on_closing(window):
     return True  # 允许关闭
 
 
+# 单实例互斥体句柄（模块级保持引用，防止 GC 提前释放导致互斥失效）
+_MUTEX_HANDLE = None
+
+
+def _acquire_single_instance() -> bool:
+    """单实例控制：创建命名互斥体。
+
+    - 互斥体已存在（ERROR_ALREADY_EXISTS=183）→ 已有实例在运行：
+      唤起其主窗口（如果找到）并返回 False（调用方退出）
+    - 创建成功 → 本实例持有互斥体，返回 True
+    - 创建失败（权限等异常）→ 不阻塞，放行（返回 True）
+
+    开发版（python main.py）与安装版（exe）使用同一互斥体名，互相排斥。
+    Mutex 由进程持有，进程退出时自动释放。
+    """
+    global _MUTEX_HANDLE
+    try:
+        import ctypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        MUTEX_NAME = "Local\\QingxinTranslator_SingleInstance"
+        _MUTEX_HANDLE = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        if not _MUTEX_HANDLE:
+            log.debug("Single instance mutex creation failed, allowing start")
+            return True
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            # 已有实例：唤起其主窗口（尽力而为），本实例退出
+            try:
+                import ctypes as _c
+                user32 = _c.windll.user32
+                hwnd = user32.FindWindowW(None, APP_NAME)
+                if hwnd:
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    user32.ShowWindow(hwnd, 5)  # SW_SHOW
+                    user32.SetForegroundWindow(hwnd)
+                    log.info("Existing instance found, its window activated; new instance exits")
+                else:
+                    log.info("Existing instance found (window not found); new instance exits")
+            except Exception as e:
+                log.debug(f"Activate existing window failed: {e}")
+            return False
+        return True
+    except Exception as e:
+        log.debug(f"Single instance check failed: {e}")
+        return True
+
+
 def main():
     """主函数"""
+    # 单实例控制：已有一个实例时唤起其窗口并退出
+    if not _acquire_single_instance():
+        return
     log.info("Starting main function...")
     
     # 初始化应用
@@ -678,7 +727,7 @@ def main():
     # 屏幕外创建（避免 WebView2 初始化时的白屏/黑屏闪烁），页面加载完成后移到上次位置或屏幕中央
     window = webview.create_window(
         title=APP_NAME,
-        url=str(ROOT_DIR / "web" / "index.html"),
+        url=str(ROOT_DIR / "web" / "index.html") + "?v=" + str(int(__import__('time').time())),  # 时间戳防 WebView2 缓存旧 CSS
         width=saved_w if saved_w else width,
         height=saved_h if saved_h else height,
         min_size=(min_width, min_height),
@@ -701,7 +750,7 @@ def main():
             screen_h = user32.GetSystemMetrics(1)
             win_w = window.width
             win_h = window.height
-            
+
             # 优先恢复上次保存的位置
             if saved_x is not None and saved_y is not None:
                 # 确保位置在屏幕内（防止显示器变更后窗口跑到屏幕外）
@@ -809,7 +858,7 @@ def main():
     try:
         tooltip_win = webview.create_window(
             title="QingxinTooltip",
-            url=str(ROOT_DIR / "web" / "tray_tooltip.html") + "?v=1",
+            url=str(ROOT_DIR / "web" / "tray_tooltip.html") + "?v=" + str(int(__import__('time').time())),
             width=160,
             height=32,
             min_size=(1, 1),
@@ -820,7 +869,7 @@ def main():
             text_select=False,
             x=-10000,
             y=-10000,
-            background_color="#FFFFFF",
+            background_color="#FFFFFF",  # 四角颜色由页面 body 深色控制（与深色桌面融合）
             js_api=api
         )
         api.set_tray_tooltip_window(tooltip_win)
@@ -848,9 +897,9 @@ def main():
     try:
         hover_btn_win = webview.create_window(
             title="QingxinHoverBtn",
-            url=str(ROOT_DIR / "web" / "hover_button.html") + "?v=1",
-            width=70,
-            height=30,
+            url=str(ROOT_DIR / "web" / "hover_button.html") + "?v=" + str(int(__import__('time').time())),
+            width=72,
+            height=28,
             min_size=(1, 1),
             frameless=True,
             on_top=True,
@@ -863,6 +912,8 @@ def main():
             js_api=api
         )
         api.set_hover_btn_window(hover_btn_win)
+        # 页面加载完成标记（显示前等待，避免首次显示空白）
+        hover_btn_win.events.loaded += lambda: setattr(api, "_hover_btn_ready", True)
         # 创建后立即隐藏（Win32）
         try:
             api.hide_hover_btn()

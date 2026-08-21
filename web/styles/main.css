@@ -38,6 +38,10 @@ body {
     overflow: hidden;
     user-select: none;
     line-height: 1.5;
+    /* 主窗口圆角：系统圆角被禁用（DONOTROUND，其投影无法消除），
+       圆角由 Python 端 rgn 裁剪（创建时设置，四角真透明露桌面），
+       此 CSS 圆角与 rgn 对齐，确保内容也被圆角裁切 */
+    border-radius: 8px;
 }
 
 /* Title Bar */
@@ -816,6 +820,16 @@ body {
     flex: 1;
 }
 
+/* 禁用 WebView2/Chromium 对 password 输入框的原生"眼睛"图标（避免与自定义眼睛重复） */
+.input-with-icon .setting-input::-ms-reveal,
+.input-with-icon .setting-input::-ms-clear,
+.input-with-icon .setting-input::-webkit-credentials-auto-fill-button,
+.input-with-icon .setting-input::-webkit-contacts-auto-fill-button,
+.input-with-icon .setting-input::-webkit-strong-password-viewable {
+    display: none !important;
+    visibility: hidden;
+}
+
 .input-with-icon .setting-input {
     width: 100%;
     padding-right: 36px;
@@ -1164,7 +1178,7 @@ input:checked + .slider:before {
     background: var(--background);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-lg);
+    box-shadow: none;  /* 无阴影（用户要求）；投影由 DONOTROUND 禁用 */
     padding: 6px;
     z-index: 4000;
     animation: trayMenuIn 0.15s ease;

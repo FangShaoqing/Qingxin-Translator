@@ -139,6 +139,43 @@ class SelectionTranslator:
         log.info("Selection: auto-copy failed")
         return None
 
+    def probe_selection(self) -> Optional[str]:
+        """探测当前是否有选中文本（复制到剪贴板后【恢复原剪贴板内容】）
+
+        用于悬浮按钮显示前的判断：拖选文本才有内容，空白拖动/拖动窗口无内容。
+        探测完成后剪贴板恢复原样，不干扰用户剪贴板。
+        """
+        try:
+            import pyperclip
+            old_cb = None
+            try:
+                old_cb = pyperclip.paste()
+            except Exception:
+                pass
+            if _try_send_ctrl_c():
+                text = pyperclip.paste()
+                # 恢复原剪贴板内容（探测完不保留选区）
+                try:
+                    if old_cb:
+                        pyperclip.copy(old_cb)
+                    else:
+                        pyperclip.copy("")
+                except Exception:
+                    pass
+                if text and text.strip():
+                    return text.strip()
+            else:
+                # 复制失败：恢复剪贴板（_try_send_ctrl_c 失败时会自己恢复，这里兜底）
+                try:
+                    if old_cb:
+                        pyperclip.copy(old_cb)
+                except Exception:
+                    pass
+            return None
+        except Exception as e:
+            log.debug(f"probe_selection error: {e}")
+            return None
+
     def trigger_selection_translate(self) -> Optional[dict]:
         log.info("Selection translate triggered")
         text = self.get_selected_text()

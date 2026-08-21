@@ -43,6 +43,8 @@ class Api:
         self._hover_btn_timer = None
         self._hover_btn_visible = False
         self._hover_btn_pos = None
+        # 最近一次划词翻译活动时间（剪贴板监听防双触发）
+        self._last_selection_ts = 0.0
     
     def _capture_mouse_pos(self):
         """记录当前鼠标位置（热键触发瞬间调用，供翻译完成后定位气泡）"""
@@ -916,6 +918,12 @@ class Api:
             import pyperclip
             pyperclip.copy(translation)
             log.info(f"Translation auto-copied: '{translation[:50]}...'")
+            # 标记剪贴板监听：本次写入是应用自身产生的（译文），不触发连锁翻译
+            try:
+                from core.clipboard_monitor import clipboard_monitor
+                clipboard_monitor.mark_handled(translation)
+            except Exception:
+                pass
         except Exception as e:
             log.debug(f"Auto copy failed: {e}")
     
@@ -1226,6 +1234,8 @@ class Api:
             except Exception:
                 pass
 
+            # 不使用 WS_EX_LAYERED、不禁用系统圆角：保持普通窗口 + Win11 系统圆角
+            # （四角真透明露桌面；系统圆角自带的淡投影跟随系统主题；CSS box-shadow 已移除）
             user32.ShowWindow(hwnd, 5)   # SW_SHOW
             user32.ShowWindow(hwnd, 9)   # SW_RESTORE
             # 置顶（只置顶不移动；勿声明 argtypes——进程级共享 windll；hWndInsertAfter 用 64 位指针）
@@ -1401,17 +1411,21 @@ class Api:
             return 0
         return 0
 
-    def _apply_round_region(self, hwnd, w: int, h: int):
+    def _apply_round_region(self, hwnd, w: int, h: int, radius: int = 20, inset: int = 0):
         """给窗口设置圆角窗口区域（四角真正透明，只保留圆角卡片）
 
-        用于气泡/tooltip：与网页 CSS border-radius 10px 对应（CreateRoundRectRgn 圆角 20x20）。
+        radius: CreateRoundRectRgn 的圆角椭圆尺寸（2x 对应 CSS border-radius）。
+        inset: 从窗口边缘向内收缩的像素数（用于裁掉 DWM 1px 轮廓/边缘杂色）。
+        气泡/tooltip 用 20x20（CSS 10px）；悬浮按钮小窗口用 16x16（CSS 8px）。
         """
         try:
             import ctypes
             u32 = ctypes.windll.user32
             # CreateRoundRectRgn 在 gdi32.dll（不在 user32.dll）！
             gdi32 = ctypes.WinDLL('gdi32')
-            rgn = gdi32.CreateRoundRectRgn(0, 0, w + 1, h + 1, 20, 20)
+            # 从边缘向内收缩 inset 像素（w+1-2*inset 等）
+            rgn = gdi32.CreateRoundRectRgn(
+                inset, inset, w + 1 - inset, h + 1 - inset, radius, radius)
             if rgn:
                 u32.SetWindowRgn(hwnd, rgn, True)
         except Exception as e:
@@ -1463,9 +1477,8 @@ class Api:
             except Exception:
                 pass
 
-            # 圆角窗口区域（四角透明）
-            self._apply_round_region(hwnd, w, h)
-
+            # 不使用 WS_EX_LAYERED、不禁用系统圆角：保持普通窗口 + Win11 系统圆角
+            # （四角真透明露桌面；系统圆角自带的淡投影跟随系统主题）
             user32.ShowWindow(hwnd, 5)   # SW_SHOW
             user32.ShowWindow(hwnd, 9)   # SW_RESTORE
             user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST
@@ -1615,8 +1628,6 @@ class Api:
             rect = RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             user32.MoveWindow(hwnd, rect.left, rect.top, max(width, 80), max(height, 26), True)
-            # 圆角窗口区域随尺寸更新
-            self._apply_round_region(hwnd, max(width, 80), max(height, 26))
             log.debug(f"Tray tooltip resize to {width}x{height}")
         except Exception as e:
             log.debug(f"resize_tray_tooltip failed: {e}")
@@ -1649,23 +1660,20 @@ class Api:
         return 0
 
     def _win32_show_hover_btn(self, x: int, y: int) -> bool:
-        """用 Win32 API 在鼠标位置旁显示悬浮翻译按钮"""
+        """用 Win32 API 在鼠标位置旁显示悬浮翻译按钮
+
+        注意：窗口在屏幕外创建后 WebView2 可能报告异常尺寸（如 120x1），
+        不能依赖初始 GetWindowRect——直接用固定目标尺寸（与页面内容匹配）。
+        """
         try:
             import ctypes
             user32 = ctypes.windll.user32
             hwnd = self._find_hover_btn_hwnd()
             if not hwnd:
                 return False
-            # 读取当前尺寸
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            rect = RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(rect))
-            w = rect.right - rect.left
-            h = rect.bottom - rect.top
-            if w <= 0 or h <= 0:
-                w, h = 70, 30
+            # 固定目标尺寸：窗口 72x28 = 卡片尺寸（占满窗口，无多余底框）
+            w = 72
+            h = 28
 
             # 定位：按钮显示在鼠标右下方（选区末尾附近），超界则翻转
             mx, my = x + 14, y + 10
@@ -1690,6 +1698,8 @@ class Api:
             except Exception:
                 pass
 
+            # 保持普通窗口 + Win11 系统圆角（四角真透明露桌面，与 tooltip/菜单一致；
+            # 系统圆角自带的淡投影跟随系统主题）
             user32.ShowWindow(hwnd, 5)   # SW_SHOW
             user32.ShowWindow(hwnd, 9)   # SW_RESTORE
             user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST
@@ -1708,11 +1718,44 @@ class Api:
             hwnd = self._find_hover_btn_hwnd()
             if not hwnd:
                 return False
+            # 无任务栏按钮 + 不激活 + 清除 APPWINDOW（创建后立即隐藏时也生效）
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_TOOLWINDOW = 0x00000080
+                WS_EX_NOACTIVATE = 0x08000000
+                WS_EX_APPWINDOW = 0x00040000
+                current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                                      (current | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW)
+            except Exception:
+                pass
             user32.ShowWindow(hwnd, 0)  # SW_HIDE
             return True
         except Exception as e:
             log.debug(f"Win32 hover btn hide failed: {e}")
             return False
+
+    def resize_hover_btn(self, width: int, height: int) -> None:
+        """按内容自适应调整悬浮翻译按钮窗口尺寸（JS 测量后调用，保持左上角）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            hwnd = self._find_hover_btn_hwnd()
+            if not hwnd:
+                return
+            # 读取当前位置
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            # 内容精确尺寸（含边框），最小兜底
+            w = max(width, 72)
+            h = max(height, 28)
+            user32.MoveWindow(hwnd, rect.left, rect.top, w, h, True)
+            log.debug(f"Hover btn resize to {w}x{h}")
+        except Exception as e:
+            log.debug(f"resize_hover_btn failed: {e}")
 
     def show_hover_btn(self, x: int, y: int) -> None:
         """显示选区悬浮翻译按钮（鼠标拖选松开后由钩子调用），3 秒后自动隐藏"""
@@ -1722,7 +1765,37 @@ class Api:
             # 菜单/tooltip 可见时不显示（避免遮挡）
             if self._tray_menu_visible() or self._tray_tooltip_visible:
                 return
+            # 排除应用自身窗口上的拖选（拖动标题栏/窗口等误触发）：
+            # 鼠标位置若在应用任一窗口内（主窗口/气泡/菜单/tooltip/悬浮按钮），不显示
+            if self._is_mouse_on_own_window(x, y):
+                return
+            # 关键：探测是否真的选中了文本——空白拖动/拖动窗口/桌面拖动都没有选区，
+            # Ctrl+C 探测（完成后恢复剪贴板），有内容才显示按钮
+            from core.selection_translator import selection_translator
+            selected = selection_translator.probe_selection()
+            if not selected:
+                log.debug("Hover btn suppressed: no text selected")
+                return
+            self._hover_btn_text = selected
+            # 等待页面加载完成（首次显示时 WebView2 可能未渲染 → 空白弹窗）
+            import time as _t
+            deadline = _t.time() + 2.0
+            while not getattr(self, "_hover_btn_ready", False) and _t.time() < deadline:
+                _t.sleep(0.05)
+            # 关键：用 pywebview 的 resize() 强制 WebView2 重新布局——
+            # 窗口在屏幕外创建时为 1px 高，内容按 1px 布局；仅 MoveWindow 不会触发
+            # WebView2 控件重排，导致"窗口正常但内容扁"。
+            try:
+                self._hover_btn_window.resize(72, 28)
+            except Exception:
+                pass
+            _t.sleep(0.15)
             self._win32_show_hover_btn(x, y)
+            # 显示后再次触发 WebView2 重排（异步布局兜底）
+            try:
+                self._hover_btn_window.resize(72, 28)
+            except Exception:
+                pass
             self._hover_btn_visible = True
             self._hover_btn_pos = (x, y)
             # 3 秒后自动隐藏
@@ -1736,6 +1809,59 @@ class Api:
             self._hover_btn_timer.start()
         except Exception as e:
             log.debug(f"show_hover_btn error: {e}")
+
+    def _is_mouse_on_own_window(self, x: int, y: int) -> bool:
+        """判断屏幕坐标 (x, y) 是否落在应用自身窗口内（排除误触发）
+
+        注意：WebView2 内容窗口属于渲染子进程（PID 不同），不能按 PID 判断。
+        改为沿父窗口链向上查找，判断是否属于应用任一顶层窗口的后代。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            # WindowFromPoint 需要 POINT 结构（按值传参）
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+            pt = POINT(x, y)
+            hwnd = user32.WindowFromPoint(pt)
+            if not hwnd:
+                return False
+            # 应用自身顶层窗口集合
+            own_tops = set()
+            for w in (self._window, self._bubble_window, self._tray_menu_window,
+                      self._tray_tooltip_window, self._hover_btn_window):
+                if w is None:
+                    continue
+                h = self._window_hwnd_of(w)
+                if h:
+                    own_tops.add(h)
+            # 沿父链向上（最多 20 层），判断是否属于应用顶层窗口的后代
+            cur = hwnd
+            for _ in range(20):
+                if cur in own_tops:
+                    return True
+                cur = user32.GetAncestor(cur, 1)  # GA_PARENT
+                if not cur:
+                    break
+            return False
+        except Exception:
+            return False
+
+    def _window_hwnd_of(self, window) -> int:
+        """获取 pywebview 窗口对象的 Win32 句柄"""
+        try:
+            native = getattr(window, 'native', None)
+            if native is not None:
+                handle = getattr(native, 'Handle', None)
+                if handle is not None:
+                    try:
+                        return handle.ToInt64()
+                    except Exception:
+                        return int(handle)
+            return 0
+        except Exception:
+            return 0
 
     def hide_hover_btn(self) -> None:
         """隐藏选区悬浮翻译按钮"""
@@ -1758,13 +1884,18 @@ class Api:
         try:
             log.info("Hover button clicked, triggering selection translate")
             self.hide_hover_btn()
+            # 标记划词活动时间（剪贴板监听防双触发）
+            self._last_selection_ts = time.time()
             # 记录按钮位置作为气泡定位锚点（按钮出现在选区末尾附近）
             if self._hover_btn_pos:
                 self._bubble_pos = self._hover_btn_pos
-            # 触发划词翻译（自动复制选中文本 → 翻译 → 按模式显示）
-            from core.selection_translator import selection_translator
-            selection_translator.set_translate_callback(self._do_translate)
-            text = selection_translator.get_selected_text()
+            # 使用显示按钮时缓存的选中文本（点击按钮时选区可能已消失，
+            # 且 probe_selection 已恢复剪贴板——直接用缓存文本翻译）
+            text = getattr(self, "_hover_btn_text", "") or ""
+            if not text:
+                # 兜底：重新获取选中文本
+                from core.selection_translator import selection_translator
+                text = selection_translator.get_selected_text() or ""
             if not text:
                 self._show_selection_error("未获取到选中文本，请重新选择")
                 return {"success": False, "error": "自动复制未生效"}
@@ -1813,6 +1944,11 @@ class Api:
     def _on_clipboard_text(self, text: str):
         """剪贴板出现新文本：自动翻译（按划词模式显示）"""
         try:
+            # 防御：避免与划词翻译（Ctrl+C 复制选区）双触发——若 1.5s 内有划词活动则跳过
+            now = time.time()
+            if now - getattr(self, "_last_selection_ts", 0) < 1.5:
+                log.debug("Clipboard text ignored (selection translate active)")
+                return
             log.info(f"Clipboard text detected: '{text[:40]}...' (len={len(text)})")
             # 记录当前鼠标位置（供气泡定位）
             self._capture_mouse_pos()
@@ -2100,7 +2236,7 @@ class Api:
             self._window.destroy()
     
     def resize(self, width: int, height: int) -> None:
-        """调整窗口大小"""
+        """调整窗口大小（主窗口 JS 内容自适应调用）"""
         if self._window:
             self._window.resize(width, height)
     
@@ -2140,6 +2276,8 @@ class Api:
         try:
             # 热键触发瞬间记录鼠标位置（供翻译完成后定位气泡）
             self._capture_mouse_pos()
+            # 标记划词活动时间（剪贴板监听防双触发）
+            self._last_selection_ts = time.time()
             
             from core.selection_translator import selection_translator
             selection_translator.set_translate_callback(self._do_translate)
@@ -2179,6 +2317,8 @@ class Api:
         try:
             # 回调触发时记录鼠标位置（供翻译完成后定位气泡）
             self._capture_mouse_pos()
+            # 标记划词活动时间（剪贴板监听防双触发）
+            self._last_selection_ts = time.time()
             
             if not text or not text.strip():
                 self._show_selection_error("未获取到选中文本")
@@ -2288,6 +2428,13 @@ class Api:
             english_count = sum(1 for c in text if 'a' <= c.lower() <= 'z')
             
             log.info(f"Selection translate - detected='{lang}', zh_chars={chinese_count}, en_chars={english_count}, mixed={is_mixed}")
+            
+            # langdetect 对短文本/数字混合文本不可靠（如"200个"会被误判为 en）：
+            # 翻译方向以字符统计为准——含中文（无英文）→ 译成英文；含英文（无中文）→ 译成中文
+            if chinese_count > 0 and english_count == 0:
+                lang = "zh"
+            elif english_count > 0 and chinese_count == 0:
+                lang = "en"
             
             if is_mixed:
                 # 中英混合：统一翻译为英文
