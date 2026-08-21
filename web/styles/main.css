@@ -222,7 +222,7 @@ body {
     padding: 5px 8px 5px 10px;
     background: var(--pink-light);
     border: 1px solid var(--pink-primary);
-    border-radius: 999px;   /* 胶囊形状，紧凑 */
+    border-radius: var(--radius-sm);   /* 与主应用一致 8px（原 999px 胶囊太圆） */
     box-shadow: var(--shadow-sm);
     animation: slideDown 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
@@ -240,11 +240,15 @@ body {
     width: 14px;
     height: 14px;
     flex-shrink: 0;
+    display: flex;               /* 图标容器 flex 居中，防 SVG 基线偏移导致错位 */
+    align-items: center;
+    justify-content: center;
 }
 
 .update-bar-icon svg {
     width: 14px;
     height: 14px;
+    display: block;
     color: var(--pink-dark);
 }
 
@@ -260,7 +264,7 @@ body {
 .update-bar-btn {
     padding: 2px 10px;
     border: none;
-    border-radius: 999px;
+    border-radius: var(--radius-sm);   /* 与主应用一致 8px */
     background: var(--pink-primary);
     color: var(--text-primary);
     font-size: 11px;
