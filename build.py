@@ -60,10 +60,11 @@ config = {
     ],
     
     # 排除的模块（减小体积）
+    # 注意：不要排除 numpy——skia-python 144 的像素缓冲依赖 numpy，
+    # 排除后玻璃菜单/tooltip 渲染报 "No module named 'numpy'"（2026-08 v0.3.3 实测）
     'excludes': [
         'tkinter',
         'matplotlib',
-        'numpy',
         'pandas',
         'scipy',
         'PySide6',
@@ -108,6 +109,14 @@ def get_pyinstaller_args():
 
 
 if __name__ == '__main__':
+    import os
+    # PyInstaller 依赖收集按 PATH 顺序搜索 DLL；IDEA 自带 JDK bin 含旧版
+    # MSVCP140.dll(14.16 "cloudtest") 且排在 System32 之前 → 收集旧版致
+    # skia.pyd 加载崩溃（0xC0000005，v0.3.3 实测）。构建前剔除 JDK 目录。
+    os.environ['PATH'] = os.pathsep.join(
+        p for p in os.environ.get('PATH', '').split(os.pathsep)
+        if p and 'jdk' not in p.lower())
+
     import PyInstaller.__main__
     
     args = get_pyinstaller_args()
