@@ -19,6 +19,9 @@ from core.language_detector import language_detector
 from models.database import init_db, close_db
 from models.history import History
 
+# Skia 自绘卡片（悬浮按钮/tooltip/托盘菜单——自定义圆角+阴影；高 DPI 屏回退 WebView2）
+from core.glass_card import GlassCard, render_button, render_tooltip, render_menu, hit_test_menu, MENU_ITEM_H
+
 
 class Api:
     """Python与JS通信的API类"""
@@ -45,6 +48,39 @@ class Api:
         self._hover_btn_pos = None
         # 最近一次划词翻译活动时间（剪贴板监听防双触发）
         self._last_selection_ts = 0.0
+        # Skia 自绘卡片（惰性创建）
+        self._glass_btn = None
+        self._glass_tip = None
+        self._glass_menu = None          # Skia 托盘菜单
+        self._glass_menu_items = []      # 菜单数据
+        self._glass_menu_rows = []       # 布局行（hover 命中用）
+        self._glass_menu_hover_idx = -1  # 当前 hover 项（注意：勿与 _glass_menu_hover 方法重名）
+        self._glass_menu_action = None   # 动作分发函数
+        # 悬浮按钮 worker 线程（probe/显示不阻塞鼠标钩子回调；窗口创建在有消息循环的线程）
+        self._hover_queue = None
+        self._hover_worker_started = False
+
+    def _screen_dpi_at(self, x: int, y: int) -> int:
+        """返回屏幕坐标 (x, y) 所在显示器的 DPI（per-monitor v2 下为真实值）
+
+        用于决定悬浮按钮/tooltip 用 Skia 自绘（100%）还是 WebView2 回退（>100%）——
+        UpdateLayeredWindow 内容在缩放屏上不显示（Windows layered 窗口已知限制）。
+        进程已声明 per-monitor v2，钩子/定位坐标统一为物理像素，GetDpiForMonitor 返回真实 DPI。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            mon = u32.MonitorFromPoint(POINT(x, y), 2)
+            shcore = ctypes.WinDLL('shcore')
+            dx, dy = wintypes.UINT(), wintypes.UINT()
+            if shcore.GetDpiForMonitor(mon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+                return int(dx.value)
+        except Exception:
+            pass
+        return 96
     
     def _capture_mouse_pos(self):
         """记录当前鼠标位置（热键触发瞬间调用，供翻译完成后定位气泡）"""
@@ -64,6 +100,83 @@ class Api:
     def set_window(self, window):
         """设置pywebview窗口引用"""
         self._window = window
+
+    def start_main_dpi_follow(self, window):
+        """主窗口跨屏 DPI 自适应（per-monitor v2 下调用）
+
+        轮询检测窗口中心所在屏 DPI，跨屏时物理尺寸 = 逻辑尺寸 × dpi/96，
+        并保持鼠标在窗口内的相对位置（拖动跨屏瞬间鼠标不脱离标题栏）：
+        - 内容 1:1 渲染（unaware 的 DWM 位图缩放会模糊）
+        - 实时调整（无拖动检测延迟，否则拖动跨屏后窗口保持旧尺寸会缩小/偏移）
+        不用 WM_DPICHANGED 子类化：pywebview/WinForms 自身已处理第一次缩放，
+        子类化会导致二次缩放（建议值翻倍/减半）。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            shcore = ctypes.WinDLL('shcore')
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            stop = threading.Event()
+
+            def _follow():
+                last_dpi = None
+                logical_w = None
+                logical_h = None
+                while not stop.wait(0.5):
+                    try:
+                        if window is None:
+                            continue
+                        hwnd = self._window_hwnd_of(window)
+                        if not hwnd:
+                            continue
+                        rect = RECT()
+                        if not u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                            continue
+                        # 窗口中心点所在屏的 DPI
+                        cx = (rect.left + rect.right) // 2
+                        cy = (rect.top + rect.bottom) // 2
+                        mon = u32.MonitorFromPoint(POINT(cx, cy), 2)
+                        dx, dy = wintypes.UINT(), wintypes.UINT()
+                        dpi = 96
+                        if shcore.GetDpiForMonitor(mon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0:
+                            dpi = int(dx.value)
+                        cur_w = rect.right - rect.left
+                        cur_h = rect.bottom - rect.top
+                        if last_dpi is not None and dpi != last_dpi and logical_w:
+                            # 跨屏：按旧逻辑基准 × 新 dpi/96 调整物理尺寸
+                            new_w = max(100, int(round(logical_w * dpi / 96)))
+                            new_h = max(60, int(round(logical_h * dpi / 96)))
+                            # 保持鼠标在窗口内的相对位置（调整后鼠标仍停在标题栏相对位置）
+                            try:
+                                pt = POINT()
+                                u32.GetCursorPos(ctypes.byref(pt))
+                                rel_x = (pt.x - rect.left) / cur_w if cur_w > 0 else 0.5
+                                rel_y = (pt.y - rect.top) / cur_h if cur_h > 0 else 0.5
+                                new_left = int(pt.x - rel_x * new_w)
+                                new_top = int(pt.y - rel_y * new_h)
+                                u32.MoveWindow(hwnd, new_left, new_top, new_w, new_h, True)
+                                log.info(f"Main window DPI adaptive: {last_dpi}->{dpi}, "
+                                         f"resize {new_w}x{new_h} at ({new_left},{new_top})")
+                            except Exception as e:
+                                log.debug(f"Main window DPI adaptive resize failed: {e}")
+                            last_dpi = dpi
+                            continue  # 下一轮用新尺寸更新逻辑基准
+                        # 同 DPI：逻辑基准 = 当前物理 / (dpi/96)（跟随用户手动调整）
+                        last_dpi = dpi
+                        logical_w = cur_w * 96 / dpi
+                        logical_h = cur_h * 96 / dpi
+                    except Exception as e:
+                        log.debug(f"Main DPI follow error: {e}")
+            threading.Thread(target=_follow, daemon=True, name="MainDpiFollow").start()
+            log.info("Main window DPI follow started")
+        except Exception as e:
+            log.warning(f"Main window DPI follow init failed: {e}")
+
     
     def set_bubble_window(self, window):
         """设置划词翻译气泡窗口引用"""
@@ -248,7 +361,12 @@ class Api:
             return False
     
     def resize_bubble(self, width: int, height: int) -> None:
-        """按内容自适应调整气泡窗口尺寸（保持当前位置）"""
+        """按内容自适应调整气泡窗口尺寸（保持当前位置）
+
+        JS 测量的 width/height 是 CSS 像素；per-monitor v2 下 WebView2 的
+        devicePixelRatio = dpi/96，物理窗口尺寸必须 = CSS × dpi/96，
+        否则高 DPI 屏（如笔记本 200%）上内容溢出被截断。
+        """
         try:
             import ctypes
             user32 = ctypes.windll.user32
@@ -262,16 +380,23 @@ class Api:
                             ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
             rect = RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            # CSS → 物理像素（按气泡中心所在屏 DPI 缩放）
+            scale = self._screen_dpi_at(
+                rect.left + max(width, 1) // 2,
+                rect.top + max(height, 1) // 2) / 96.0
+            phys_w = max(60, int(round(width * scale)))
+            phys_h = max(40, int(round(height * scale)))
             # 调整尺寸（保持左上角不变）
-            ok = user32.MoveWindow(hwnd, rect.left, rect.top, width, height, True)
+            ok = user32.MoveWindow(hwnd, rect.left, rect.top, phys_w, phys_h, True)
             # 圆角窗口区域随尺寸更新（四角透明，只留卡片）
-            self._apply_round_region(hwnd, width, height)
+            self._apply_round_region(hwnd, phys_w, phys_h)
             # 验证实际尺寸（MoveWindow 后立即读回）
             rect2 = RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect2))
             actual_w = rect2.right - rect2.left
             actual_h = rect2.bottom - rect2.top
-            log.info(f"Bubble resize: target={width}x{height}, actual={actual_w}x{actual_h}, pos=({rect.left},{rect.top}), ok={ok}")
+            log.info(f"Bubble resize: css={width}x{height} scale={scale:.2f} -> "
+                     f"{phys_w}x{phys_h}, actual={actual_w}x{actual_h}, pos=({rect.left},{rect.top}), ok={ok}")
         except Exception as e:
             log.error(f"Bubble resize failed: {e}")
 
@@ -1274,6 +1399,177 @@ class Api:
             log.debug(f"Win32 tray menu hide failed: {e}")
             return False
 
+    def _build_glass_menu_items(self) -> list:
+        """构建 Skia 菜单数据（含当前状态）"""
+        try:
+            from core.startup_manager import is_launch_at_startup
+            display_mode = config.get("selection_display_mode", "bubble")
+            on_top = bool(config.get("window_on_top", False))
+            startup = False
+            try:
+                startup = is_launch_at_startup()
+            except Exception:
+                pass
+            return [
+                {"type": "header", "text": "青欣翻译"},
+                {"type": "item", "text": "显示窗口", "action": "show", "icon": "show"},
+                {"type": "item", "text": "隐藏窗口", "action": "hide", "icon": "hide"},
+                {"type": "sep"},
+                {"type": "label", "text": "划词模式"},
+                {"type": "item", "text": "气泡", "action": "mode-bubble",
+                 "sub": True, "radio": True, "checked": display_mode != "window"},
+                {"type": "item", "text": "窗口", "action": "mode-window",
+                 "sub": True, "radio": True, "checked": display_mode == "window"},
+                {"type": "item", "text": "窗口置顶", "action": "on-top",
+                 "sub": True, "checked": on_top},
+                {"type": "item", "text": "开机自启", "action": "startup",
+                 "sub": True, "checked": startup},
+                {"type": "sep"},
+                {"type": "item", "text": "清空历史记录", "action": "clear-history", "icon": "trash"},
+                {"type": "sep"},
+                {"type": "item", "text": "退出", "action": "quit", "icon": "power", "quit": True},
+            ]
+        except Exception as e:
+            log.debug(f"build glass menu failed: {e}")
+            return []
+
+    def _glass_menu_action_handler(self, action: str) -> None:
+        """执行托盘菜单动作（在 UI 线程回调中调用）"""
+        try:
+            if action == "show":
+                self.show_window_from_tray()
+            elif action == "hide":
+                self.tray_hide_window()
+            elif action == "mode-bubble":
+                self.save_settings({"selection_display_mode": "bubble"})
+            elif action == "mode-window":
+                self.save_settings({"selection_display_mode": "window"})
+            elif action == "on-top":
+                self.tray_toggle_on_top()
+            elif action == "startup":
+                self.tray_toggle_startup()
+            elif action == "clear-history":
+                self.clear_history()
+            elif action == "quit":
+                self.tray_quit()
+            log.info(f"Tray menu action: {action}")
+        except Exception as e:
+            log.debug(f"tray menu action failed ({action}): {e}")
+
+    def _ensure_glass_menu(self):
+        """确保托盘菜单 glass 窗口有效；失效重建"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if self._glass_menu is not None:
+                hwnd = self._glass_menu.hwnd
+                if hwnd and user32.IsWindow(hwnd):
+                    return True
+                try:
+                    self._glass_menu.destroy()
+                except Exception:
+                    pass
+                self._glass_menu = None
+            self._glass_menu = GlassCard(
+                "QingxinGlassMenu",
+                on_hover=self._glass_menu_hover,
+                on_leave=self._glass_menu_leave,
+                on_mouse_down=self._glass_menu_click)
+            ok = self._glass_menu.create(210, 400)
+            return bool(ok)
+        except Exception as e:
+            log.debug(f"ensure glass menu failed: {e}")
+            return False
+
+    def _glass_menu_hover(self, x: int, y: int) -> None:
+        """菜单 hover：高亮当前项并重渲染"""
+        try:
+            idx = hit_test_menu(self._glass_menu_rows, x, y)
+            if idx is not None and idx != self._glass_menu_hover_idx:
+                self._glass_menu_hover_idx = idx
+                self._render_glass_menu()
+        except Exception as e:
+            log.debug(f"glass menu hover error: {e}")
+
+    def _glass_menu_leave(self) -> None:
+        """菜单 hover 离开：清除高亮"""
+        try:
+            if self._glass_menu_hover_idx != -1:
+                self._glass_menu_hover_idx = -1
+                self._render_glass_menu()
+        except Exception as e:
+            log.debug(f"glass menu leave error: {e}")
+
+    def _glass_menu_click(self, x: int, y: int) -> None:
+        """菜单点击：命中项执行动作"""
+        try:
+            idx = hit_test_menu(self._glass_menu_rows, x, y)
+            if idx is None:
+                return
+            if 0 <= idx < len(self._glass_menu_items):
+                item = self._glass_menu_items[idx]
+                action = item.get("action")
+                if action:
+                    self.hide_tray_menu()
+                    # 动作在独立线程执行（避免阻塞 UI 线程；与悬浮按钮点击同策略）
+                    threading.Thread(target=self._glass_menu_action_handler,
+                                     args=(action,), daemon=True,
+                                     name="GlassMenuAction").start()
+        except Exception as e:
+            log.debug(f"glass menu click error: {e}")
+
+    def _render_glass_menu(self) -> None:
+        """渲染菜单卡片并更新窗口内容"""
+        try:
+            data, w, h, rows = render_menu(
+                self._glass_menu_items, hover_idx=self._glass_menu_hover_idx)
+            self._glass_menu_rows = rows
+            ok = self._glass_menu.render(data, w, h)
+            if not ok:
+                log.warning("Glass menu render FAILED")
+        except Exception as e:
+            log.debug(f"render glass menu error: {e}")
+
+    def _show_tray_menu_glass(self, x: int, y: int) -> bool:
+        """Skia 自绘托盘菜单（100% DPI 屏）——自定义圆角+阴影"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if not self._ensure_glass_menu():
+                return False
+            self._glass_menu_items = self._build_glass_menu_items()
+            self._glass_menu_hover_idx = -1
+            self._render_glass_menu()
+            # 窗口尺寸（含阴影 pad）——读取渲染后窗口实际尺寸
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            user32.GetWindowRect(self._glass_menu.hwnd, ctypes.byref(rect))
+            cw = rect.right - rect.left
+            ch = rect.bottom - rect.top
+            # 定位（与 WebView2 版一致：菜单在鼠标上方）
+            mx, my = x, y - ch - 8
+            # 屏幕边界
+            sw = user32.GetSystemMetrics(0)
+            sh = user32.GetSystemMetrics(1)
+            if my < 0:
+                my = y + 8
+            if mx + cw > sw:
+                mx = sw - cw - 4
+            if my + ch > sh:
+                my = sh - ch - 4
+            mx = max(0, mx)
+            my = max(0, my)
+            self._glass_menu.show(mx, my)
+            log.info(f"Tray menu (glass) shown at ({mx}, {my}) size={cw}x{ch}")
+            # 失焦监听在显示后启动（任何显示路径都生效）
+            self._start_menu_lost_focus_watch_glass()
+            return True
+        except Exception as e:
+            log.debug(f"show_tray_menu_glass error: {e}")
+            return False
+
     def show_tray_menu(self, x: int, y: int) -> None:
         """显示自定义托盘菜单（右键托盘图标时由 main 调用）"""
         try:
@@ -1282,6 +1578,18 @@ class Api:
                 return
             # 菜单显示前先隐藏 tooltip（两者不应同时出现）
             self.hide_tray_tooltip()
+            # 100% DPI 屏用 Skia 自绘（自定义圆角+阴影）；高 DPI 屏回退 WebView2
+            if self._screen_dpi_at(x, y) <= 100:
+                # 必须在 UI 线程创建/显示 glass（ULW 内容合成要求）——PostMessage 到主窗口
+                # （失焦监听由 _show_tray_menu_glass 内部启动）
+                hwnd = getattr(self, "_hover_bridge_hwnd", 0)
+                msg = getattr(self, "_hover_menu_msg", 0)
+                if hwnd and msg:
+                    import ctypes
+                    ctypes.windll.user32.PostMessageW(hwnd, msg, x, y)
+                    return
+                if self._show_tray_menu_glass(x, y):
+                    return
             # 先让 JS 刷新状态并自适应尺寸，稍等渲染完成后定位
             try:
                 self._tray_menu_window.evaluate_js(
@@ -1340,8 +1648,10 @@ class Api:
         t.start()
 
     def _tray_menu_visible(self) -> bool:
-        """菜单窗口当前是否可见"""
+        """菜单窗口当前是否可见（含玻璃菜单）"""
         try:
+            if self._glass_menu is not None and self._glass_menu.visible:
+                return True
             import ctypes
             user32 = ctypes.windll.user32
             hwnd = self._find_tray_menu_hwnd()
@@ -1352,12 +1662,75 @@ class Api:
     def hide_tray_menu(self) -> None:
         """隐藏自定义托盘菜单（点击菜单项/失焦/Esc 时调用）"""
         try:
+            # 玻璃菜单隐藏
+            if self._glass_menu is not None:
+                try:
+                    self._glass_menu.hide()
+                except Exception:
+                    pass
             if not self._tray_menu_window:
                 return
             self._win32_hide_tray_menu()
             log.info("Tray menu hidden")
         except Exception as e:
             log.debug(f"hide_tray_menu error: {e}")
+
+    def _start_menu_lost_focus_watch_glass(self):
+        """玻璃菜单失焦监听：点击菜单外任意区域 / 按 Esc 时隐藏菜单
+
+        玻璃菜单是 WS_EX_NOACTIVATE，永远不成为前台窗口，不能用前台判断失焦——
+        改为检测"左键按下且位置在菜单矩形外"（菜单内点击由 WndProc 处理）。
+        """
+        def _watch():
+            try:
+                import ctypes
+                from ctypes import wintypes
+                user32 = ctypes.windll.user32
+                # PostMessage 是异步的：先等菜单对象创建并显示（visible=True）再监听
+                menu = None
+                wait = 0
+                while wait < 120:  # 6 秒上限
+                    menu = self._glass_menu
+                    if menu is not None and menu.hwnd and menu.visible:
+                        break
+                    time.sleep(0.05)
+                    wait += 1
+                if menu is None or not menu.hwnd:
+                    return
+                menu_hwnd = menu.hwnd
+                class POINT(ctypes.Structure):
+                    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+                class RECT(ctypes.Structure):
+                    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+                prev_down = False
+                checked = 0
+                while menu is not None and menu.visible:
+                    time.sleep(0.1)
+                    checked += 1
+                    # Esc 关闭
+                    if user32.GetAsyncKeyState(0x1B) & 0x0001:  # VK_ESCAPE 边沿
+                        self.hide_tray_menu()
+                        return
+                    # 左键按下边沿（刚按下时 prev_down=False）
+                    down = bool(user32.GetAsyncKeyState(0x01) & 0x8000)  # VK_LBUTTON
+                    if down and not prev_down:
+                        pt = POINT()
+                        user32.GetCursorPos(ctypes.byref(pt))
+                        rect = RECT()
+                        user32.GetWindowRect(menu_hwnd, ctypes.byref(rect))
+                        # 点击在菜单外 → 隐藏（菜单内点击由 WndProc 处理动作）
+                        if not (rect.left <= pt.x <= rect.right
+                                and rect.top <= pt.y <= rect.bottom):
+                            self.hide_tray_menu()
+                            return
+                    prev_down = down
+                    if checked > 300:  # 30 秒兜底
+                        self.hide_tray_menu()
+                        return
+            except Exception:
+                pass
+        threading.Thread(target=_watch, daemon=True).start()
 
     def resize_tray_menu(self, width: int, height: int) -> None:
         """按内容自适应调整托盘菜单窗口尺寸（保持左上角）"""
@@ -1457,9 +1830,13 @@ class Api:
             # 定位：以鼠标位置为基准，tooltip 显示在鼠标上方（原生 tooltip 行为）。
             # 间距 42px；水平往左挪 48px（用户实测 x-45 偏右，往左挪 3px）。
             # 注意：不能锚定 Windows 任务栏 TrayNotifyWnd——用户在 Dock 上的图标位置不同。
-            mx, my = x - 48, y - h - 42
+            # v2 物理坐标下偏移量按 DPI 缩放（高 DPI 屏显示位置才正确）
+            scale = self._screen_dpi_at(x, y) / 96.0
+            off_x = int(round(48 * scale))
+            off_y = int(round(42 * scale))
+            mx, my = x - off_x, y - h - off_y
             if my < 0:
-                my = y + 16
+                my = y + int(round(16 * scale))
             # 水平贴屏幕右缘翻转
             sw = user32.GetSystemMetrics(0)
             if mx + w > sw:
@@ -1555,6 +1932,10 @@ class Api:
             else:
                 sx, sy = x, y
                 self._tray_tooltip_anchor = (x, y)
+            # 高 DPI 屏（>100%）用 WebView2 回退；100% 屏用 Skia 自绘（自定义圆角+阴影）
+            if self._screen_dpi_at(sx, sy) <= 100:
+                self._show_tray_tooltip_glass(sx, sy, text or "青欣翻译")
+                return
             if text:
                 try:
                     import json as _json
@@ -1581,6 +1962,72 @@ class Api:
         except Exception as e:
             log.debug(f"show_tray_tooltip error: {e}")
 
+    def _ensure_glass_tip(self):
+        """确保托盘 tooltip glass 窗口有效；失效则重建（创建线程退出销毁窗口）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if self._glass_tip is not None:
+                hwnd = self._glass_tip.hwnd
+                if hwnd and user32.IsWindow(hwnd):
+                    return True
+                try:
+                    self._glass_tip.destroy()
+                except Exception:
+                    pass
+                self._glass_tip = None
+            self._glass_tip = GlassCard("QingxinGlassTip")
+            ok = self._glass_tip.create(200, 100)
+            return bool(ok)
+        except Exception:
+            return False
+
+    def _show_tray_tooltip_glass(self, x: int, y: int, text: str) -> None:
+        """Skia 自绘托盘 tooltip（100% DPI 屏）——自定义圆角+阴影"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if not self._ensure_glass_tip():
+                return
+            data, w, h = render_tooltip(text)
+            ok_render = self._glass_tip.render(data, w, h)
+            if not ok_render:
+                log.warning(f"Tray tooltip (glass) render FAILED, rebuilding...")
+                self._glass_tip = None
+                if not self._ensure_glass_tip():
+                    return
+                ok_render = self._glass_tip.render(data, w, h)
+                if not ok_render:
+                    log.warning("Tray tooltip (glass) render FAILED after rebuild")
+                    return
+            # 定位：卡片左上在鼠标上方（x-48, y-卡高-42，与 WebView2 版一致）；窗口含阴影 pad
+            pad = 10
+            card_h = 28
+            mx, my = x - 48 - pad, y - card_h - 42 - pad
+            if my < 0:
+                my = y + 16
+            sw = user32.GetSystemMetrics(0)
+            if mx + w > sw:
+                mx = sw - w - 4
+            mx = max(0, mx)
+            my = max(0, my)
+            self._glass_tip.show(mx, my)
+            self._tray_tooltip_visible = True
+            self._tray_tooltip_anchor = (x, y)
+            self._start_tooltip_watchdog()
+            # 3 秒后自动隐藏
+            if self._tray_tooltip_timer:
+                try:
+                    self._tray_tooltip_timer.cancel()
+                except Exception:
+                    pass
+            self._tray_tooltip_timer = threading.Timer(3.0, self.hide_tray_tooltip)
+            self._tray_tooltip_timer.daemon = True
+            self._tray_tooltip_timer.start()
+            log.debug(f"Tray tooltip (glass) shown at ({mx}, {my}) text={text}")
+        except Exception as e:
+            log.debug(f"show_tray_tooltip_glass error: {e}")
+
     def _start_tooltip_watchdog(self):
         """启动监视线程：鼠标移开托盘图标区域（锚点 40px 内）则隐藏 tooltip"""
         def _watch():
@@ -1595,6 +2042,7 @@ class Api:
                     ax, ay = self._tray_tooltip_anchor or (pt.x, pt.y)
                     # 距锚点超过 40px 视为鼠标已移开托盘图标（图标约 16-32px）
                     if abs(pt.x - ax) > 40 or abs(pt.y - ay) > 40:
+                        log.debug(f"Tooltip watchdog hide: mouse=({pt.x},{pt.y}) anchor=({ax},{ay})")
                         self.hide_tray_tooltip()
                         return
                     time.sleep(0.15)
@@ -1604,7 +2052,7 @@ class Api:
         t.start()
 
     def hide_tray_tooltip(self) -> None:
-        """隐藏自定义托盘 tooltip"""
+        """隐藏自定义托盘 tooltip（Skia 与 WebView2 两种都隐藏）"""
         try:
             if self._tray_tooltip_timer:
                 try:
@@ -1613,9 +2061,13 @@ class Api:
                     pass
                 self._tray_tooltip_timer = None
             self._tray_tooltip_visible = False
-            if not self._tray_tooltip_window:
-                return
-            self._win32_hide_tray_tooltip()
+            if self._glass_tip is not None:
+                try:
+                    self._glass_tip.hide()
+                except Exception:
+                    pass
+            if self._tray_tooltip_window:
+                self._win32_hide_tray_tooltip()
         except Exception as e:
             log.debug(f"hide_tray_tooltip error: {e}")
 
@@ -1669,6 +2121,7 @@ class Api:
 
         注意：窗口在屏幕外创建后 WebView2 可能报告异常尺寸（如 120x1），
         不能依赖初始 GetWindowRect——直接用固定目标尺寸（与页面内容匹配）。
+        v2 下坐标为物理像素；高 DPI 屏按钮物理尺寸 = 逻辑尺寸 × dpi/96（否则显示过小）。
         """
         try:
             import ctypes
@@ -1676,18 +2129,19 @@ class Api:
             hwnd = self._find_hover_btn_hwnd()
             if not hwnd:
                 return False
-            # 固定目标尺寸：窗口 72x28 = 卡片尺寸（占满窗口，无多余底框）
-            w = 72
-            h = 28
+            # 目标逻辑尺寸：窗口 72x28 = 卡片尺寸（占满窗口，无多余底框）
+            scale = self._screen_dpi_at(x, y) / 96.0
+            w = max(72, int(round(72 * scale)))
+            h = max(28, int(round(28 * scale)))
 
             # 定位：按钮显示在鼠标右下方（选区末尾附近），超界则翻转
-            mx, my = x + 14, y + 10
+            mx, my = x + int(round(14 * scale)), y + int(round(10 * scale))
             sw = user32.GetSystemMetrics(0)
             sh = user32.GetSystemMetrics(1)
             if mx + w > sw:
-                mx = x - w - 14
+                mx = x - w - int(round(14 * scale))
             if my + h > sh:
-                my = y - h - 10
+                my = y - h - int(round(10 * scale))
             mx = max(0, mx)
             my = max(0, my)
 
@@ -1709,7 +2163,7 @@ class Api:
             user32.ShowWindow(hwnd, 9)   # SW_RESTORE
             user32.SetWindowPos(hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002)  # TOPMOST
             user32.MoveWindow(hwnd, mx, my, w, h, True)
-            log.debug(f"Hover btn shown at ({mx}, {my}) size={w}x{h}")
+            log.debug(f"Hover btn shown at ({mx}, {my}) size={w}x{h} scale={scale:.2f}")
             return True
         except Exception as e:
             log.debug(f"Win32 hover btn show failed: {e}")
@@ -1762,8 +2216,118 @@ class Api:
         except Exception as e:
             log.debug(f"resize_hover_btn failed: {e}")
 
+    def _start_hover_worker(self):
+        """启动悬浮按钮 worker 线程（常驻、GetMessageW 阻塞消息循环）
+
+        为什么需要独立线程 + GetMessageW 阻塞循环：
+        1. probe_selection 的 SendInput Ctrl+C 在 WH_MOUSE_LL 钩子回调内注入不可靠
+           （低级钩子回调中注入键击会被系统忽略/延迟 → 探测失败、按钮不显示），
+           且会阻塞全局钩子回调导致系统卡顿；
+        2. glass 窗口必须由【阻塞在 GetMessage 的线程】创建：DWM 合成 ULW 内容
+           依赖窗口线程处于 GetMessage 等待状态（PeekMessage 轮询泵实测内容透明）。
+        任务入队用 PostThreadMessage 唤醒 GetMessage。
+        """
+        try:
+            if self._hover_worker_started:
+                return
+            import queue
+            self._hover_queue = queue.Queue()
+            self._hover_worker_started = True
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.windll.user32
+            k32 = ctypes.windll.kernel32
+            WAKE_MSG = 0x0400  # WM_USER
+            self._hover_wake_msg = WAKE_MSG
+            self._hover_worker_tid = [0]
+
+            def _process_queue():
+                """处理队列里积压的任务（取最新一次划词）"""
+                try:
+                    x, y = self._hover_queue.get_nowait()
+                except Exception:
+                    return
+                try:
+                    while True:
+                        nx, ny = self._hover_queue.get_nowait()
+                        x, y = nx, ny
+                except Exception:
+                    pass
+                try:
+                    import time as _t
+                    # 等目标应用完成选区/复制状态稳定（不阻塞钩子回调）
+                    _t.sleep(0.15)
+                    # 关键：探测是否真的选中了文本——空白拖动/拖动窗口/桌面拖动都没有选区，
+                    # Ctrl+C 探测（完成后恢复剪贴板），有内容才显示按钮
+                    from core.selection_translator import selection_translator
+                    selected = selection_translator.probe_selection()
+                    if not selected:
+                        log.debug("Hover btn suppressed: no text selected")
+                        return
+                    self._hover_btn_text = selected
+                    # 高 DPI 屏（>100%）用 WebView2 回退（Skia 的 UpdateLayeredWindow 在缩放屏不显示）；
+                    # 100% 屏用 Skia 自绘（自定义圆角+阴影）
+                    if self._screen_dpi_at(x, y) <= 100:
+                        # 关键：PostMessage 到主窗口，由子类化 WndProc 在 UI 线程创建 glass——
+                        # worker/bridge 线程创建 ULW 窗口内容透明（DWM 合成依赖 UI 线程）
+                        hwnd = getattr(self, "_hover_bridge_hwnd", 0)
+                        msg = getattr(self, "_hover_glass_msg", 0)
+                        shown = False
+                        if hwnd:
+                            try:
+                                import ctypes
+                                ctypes.windll.user32.PostMessageW(hwnd, msg, x, y)
+                                shown = True
+                            except Exception as e:
+                                log.debug(f"hover glass post failed: {e}")
+                        if not shown:
+                            self._show_hover_btn_glass(x, y)
+                    else:
+                        self._show_hover_btn_webview(x, y)
+                except Exception as e:
+                    log.debug(f"hover worker task error: {e}")
+
+            def _run():
+                self._hover_worker_tid[0] = k32.GetCurrentThreadId()
+                # 启动竞态兜底：首次入队可能发生在 tid 设置/唤醒消息之前，先处理一次
+                _process_queue()
+                msg = wintypes.MSG()
+                while True:
+                    # 阻塞等待消息（DWM 合成 ULW 内容要求窗口线程处于 GetMessage 等待）
+                    r = u32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
+                    if r == 0:      # WM_QUIT
+                        break
+                    if r == -1:
+                        log.debug("hover worker GetMessage failed")
+                        continue
+                    u32.TranslateMessage(ctypes.byref(msg))
+                    u32.DispatchMessageW(ctypes.byref(msg))
+                    # 每次消息后处理队列（唤醒消息/窗口消息都触发）
+                    _process_queue()
+
+            threading.Thread(target=_run, daemon=True, name="HoverBtnWorker").start()
+            log.info("Hover button worker started")
+        except Exception as e:
+            log.warning(f"Hover worker start failed: {e}")
+
+    def _wake_hover_worker(self):
+        """投递任务并唤醒 worker 线程（GetMessage 阻塞中）"""
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            tid = getattr(self, "_hover_worker_tid", [0])[0]
+            wake = getattr(self, "_hover_wake_msg", 0x0400)
+            if tid:
+                u32.PostThreadMessageW(tid, wake, 0, 0)
+        except Exception:
+            pass
+
     def show_hover_btn(self, x: int, y: int) -> None:
-        """显示选区悬浮翻译按钮（鼠标拖选松开后由钩子调用），3 秒后自动隐藏"""
+        """显示选区悬浮翻译按钮（鼠标拖选松开后由钩子调用），3 秒后自动隐藏
+
+        仅做快速检查，实际 probe + 显示投递到 worker 线程——
+        不在 WH_MOUSE_LL 钩子回调里执行 SendInput/窗口操作（不可靠且阻塞系统）。
+        """
         try:
             if not self._hover_btn_window:
                 return
@@ -1774,14 +2338,16 @@ class Api:
             # 鼠标位置若在应用任一窗口内（主窗口/气泡/菜单/tooltip/悬浮按钮），不显示
             if self._is_mouse_on_own_window(x, y):
                 return
-            # 关键：探测是否真的选中了文本——空白拖动/拖动窗口/桌面拖动都没有选区，
-            # Ctrl+C 探测（完成后恢复剪贴板），有内容才显示按钮
-            from core.selection_translator import selection_translator
-            selected = selection_translator.probe_selection()
-            if not selected:
-                log.debug("Hover btn suppressed: no text selected")
-                return
-            self._hover_btn_text = selected
+            self._start_hover_worker()
+            if self._hover_queue is not None:
+                self._hover_queue.put((x, y))
+                self._wake_hover_worker()
+        except Exception as e:
+            log.debug(f"show_hover_btn error: {e}")
+
+    def _show_hover_btn_webview(self, x: int, y: int) -> None:
+        """WebView2 回退显示悬浮按钮（高 DPI 屏 >100%，ULW 内容不显示）"""
+        try:
             # 等待页面加载完成（首次显示时 WebView2 可能未渲染 → 空白弹窗）
             import time as _t
             deadline = _t.time() + 2.0
@@ -1831,7 +2397,91 @@ class Api:
             self._hover_btn_timer.daemon = True
             self._hover_btn_timer.start()
         except Exception as e:
-            log.debug(f"show_hover_btn error: {e}")
+            log.debug(f"show_hover_btn webview error: {e}")
+
+    def _ensure_glass_btn(self):
+        """确保悬浮按钮 glass 窗口有效；失效（创建线程退出销毁）则重建
+
+        注意：窗口必须由【有消息循环的线程】创建（MouseHookThread 等），
+        否则 ULW 内容不合成（透明）；线程退出也会销毁窗口。
+        """
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if self._glass_btn is not None:
+                hwnd = self._glass_btn.hwnd
+                if hwnd and user32.IsWindow(hwnd):
+                    return True
+                # 窗口已销毁（如创建线程退出）：销毁旧对象重建
+                try:
+                    self._glass_btn.destroy()
+                except Exception:
+                    pass
+                self._glass_btn = None
+            # 注意：glass 按钮点击回调在 UI 线程（主窗口消息循环）执行——
+            # 翻译必须放到独立线程，否则同步网络翻译会阻塞 UI 线程
+            # （快捷键/托盘菜单/退出全部失效）。点击后立即隐藏按钮，翻译异步执行。
+            def _glass_click():
+                try:
+                    self.hide_hover_btn()
+                except Exception:
+                    pass
+                threading.Thread(target=self.hover_btn_clicked, daemon=True,
+                                 name="GlassClickTranslate").start()
+            self._glass_btn = GlassCard("QingxinGlassBtn", on_click=_glass_click)
+            ok = self._glass_btn.create(120, 70)
+            log.info(f"Hover btn (glass) recreated hwnd={self._glass_btn.hwnd}")
+            return bool(ok)
+        except Exception as e:
+            log.debug(f"ensure glass btn failed: {e}")
+            return False
+
+    def _show_hover_btn_glass(self, x: int, y: int) -> None:
+        """Skia 自绘悬浮按钮（100% DPI 屏）——自定义圆角+阴影"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            # 惰性创建/失效重建
+            if not self._ensure_glass_btn():
+                return
+            data, w, h = render_button()
+            ok_render = self._glass_btn.render(data, w, h)
+            if not ok_render:
+                log.warning(f"Hover btn (glass) render FAILED at ({x},{y}), rebuilding...")
+                self._glass_btn = None
+                if not self._ensure_glass_btn():
+                    return
+                ok_render = self._glass_btn.render(data, w, h)
+                if not ok_render:
+                    log.warning(f"Hover btn (glass) render FAILED after rebuild at ({x},{y})")
+                    return
+            # 定位：卡片左上在鼠标右下方（+14,+10，与 WebView2 版一致）；窗口含阴影 pad
+            pad = 11
+            card_w, card_h = 56, 28
+            mx, my = x + 14 - pad, y + 10 - pad
+            sw = user32.GetSystemMetrics(0)
+            sh = user32.GetSystemMetrics(1)
+            if mx + w > sw:
+                mx = x - card_w - 14 - pad
+            if my + h > sh:
+                my = y - card_h - 10 - pad
+            mx = max(0, mx)
+            my = max(0, my)
+            self._glass_btn.show(mx, my)
+            self._hover_btn_visible = True
+            self._hover_btn_pos = (x, y)
+            # 3 秒后自动隐藏
+            if self._hover_btn_timer:
+                try:
+                    self._hover_btn_timer.cancel()
+                except Exception:
+                    pass
+            self._hover_btn_timer = threading.Timer(3.0, self.hide_hover_btn)
+            self._hover_btn_timer.daemon = True
+            self._hover_btn_timer.start()
+            log.debug(f"Hover btn (glass) shown at ({mx}, {my}) render_ok={ok_render} hwnd={self._glass_btn.hwnd}")
+        except Exception as e:
+            log.debug(f"show_hover_btn_glass error: {e}")
 
     def _is_mouse_on_own_window(self, x: int, y: int) -> bool:
         """判断屏幕坐标 (x, y) 是否落在应用自身窗口内（排除误触发）
@@ -1887,7 +2537,7 @@ class Api:
             return 0
 
     def hide_hover_btn(self) -> None:
-        """隐藏选区悬浮翻译按钮"""
+        """隐藏选区悬浮翻译按钮（Skia 与 WebView2 两种都隐藏）"""
         try:
             if self._hover_btn_timer:
                 try:
@@ -1896,11 +2546,94 @@ class Api:
                     pass
                 self._hover_btn_timer = None
             self._hover_btn_visible = False
-            if not self._hover_btn_window:
-                return
-            self._win32_hide_hover_btn()
+            if self._glass_btn is not None:
+                try:
+                    self._glass_btn.hide()
+                except Exception:
+                    pass
+            if self._hover_btn_window:
+                self._win32_hide_hover_btn()
         except Exception as e:
             log.debug(f"hide_hover_btn error: {e}")
+
+    def start_main_hover_bridge(self, window):
+        """子类化主窗口 WndProc，用自定义消息在 UI 线程创建/显示 glass 按钮
+
+        ULW 内容合成要求窗口创建线程具备 UI 线程环境（GetMessage 循环 + DWM 协调）：
+        - worker 线程创建实测内容透明
+        - evaluate_js 的 js_api 回调在 pywebview bridge 线程（也透明）
+        - pywebview UI 线程（on_started 回调）实测 white=1158 正常
+        方案：worker 探测成功后 PostMessage(主窗口, WM_USER+10, x, y)，
+        主窗口 UI 线程消息循环收到后由本 WndProc 处理 → 在 UI 线程创建 glass。
+        只处理自定义消息，其余全部转发 WinForms 原窗口过程（不影响 pywebview）。
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            u32 = ctypes.WinDLL('user32')
+            u32.SetWindowLongPtrW.restype = ctypes.c_longlong
+            u32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_longlong]
+            u32.GetWindowLongPtrW.restype = ctypes.c_longlong
+            u32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            u32.CallWindowProcW.restype = ctypes.c_longlong
+            u32.CallWindowProcW.argtypes = [ctypes.c_longlong, wintypes.HWND, wintypes.UINT,
+                                            wintypes.WPARAM, wintypes.LPARAM]
+
+            GWLP_WNDPROC = -4
+            WM_HOVER_GLASS = 0x0400 + 10  # WM_USER+10（悬浮按钮）
+            WM_MENU_GLASS = 0x0400 + 11   # WM_USER+11（托盘菜单）
+            self._hover_glass_msg = WM_HOVER_GLASS
+            self._hover_menu_msg = WM_MENU_GLASS
+
+            hwnd = self._window_hwnd_of(window)
+            if not hwnd:
+                log.warning("Hover bridge: main hwnd not found")
+                return
+            old_proc = u32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
+            if not old_proc:
+                log.warning("Hover bridge: GetWindowLongPtrW failed")
+                return
+            self._hover_bridge_old = old_proc
+
+            WNDPROC = ctypes.WINFUNCTYPE(
+                ctypes.c_longlong, wintypes.HWND, wintypes.UINT,
+                wintypes.WPARAM, wintypes.LPARAM)
+
+            def _proc(h, msg, wparam, lparam):
+                if msg == WM_HOVER_GLASS:
+                    try:
+                        self._show_hover_btn_glass(int(wparam), int(lparam))
+                        return 0
+                    except Exception as e:
+                        log.debug(f"hover glass bridge error: {e}")
+                if msg == WM_MENU_GLASS:
+                    try:
+                        self._show_tray_menu_glass(int(wparam), int(lparam))
+                        return 0
+                    except Exception as e:
+                        log.debug(f"menu glass bridge error: {e}")
+                return u32.CallWindowProcW(self._hover_bridge_old, h, msg, wparam, lparam)
+
+            self._hover_bridge_proc = WNDPROC(_proc)  # 保持引用防 GC
+            new_addr = ctypes.cast(self._hover_bridge_proc, ctypes.c_void_p).value
+            if not u32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, new_addr):
+                log.warning("Hover bridge: SetWindowLongPtrW failed")
+                return
+            self._hover_bridge_hwnd = hwnd
+            log.info("Hover bridge started (WM_USER+10 subclass)")
+        except Exception as e:
+            log.warning(f"Hover bridge init failed: {e}")
+
+    def hover_glass_show(self, x: int, y: int) -> None:
+        """由主窗口 JS 调用（pywebview 主线程执行）——在主线程创建/显示 glass 按钮
+
+        ULW 内容合成要求窗口创建线程具备 pywebview UI 线程环境
+        （GetMessage 循环 + DWM 合成协调），worker 线程实测内容透明。
+        """
+        try:
+            self._show_hover_btn_glass(x, y)
+        except Exception as e:
+            log.debug(f"hover_glass_show error: {e}")
 
     def hover_btn_clicked(self) -> dict:
         """悬浮翻译按钮被点击：触发划词翻译"""

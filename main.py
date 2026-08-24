@@ -8,6 +8,15 @@ import sys
 import threading
 from pathlib import Path
 
+# 声明 per-monitor v2 DPI 感知（必须在创建任何窗口前）：
+# - 钩子/窗口坐标统一为物理像素（unaware 下笔记本 200% 屏按钮偏移 2 倍、主窗口模糊）
+# - 主窗口跨屏时由 _dpi_follow_main_window 按逻辑尺寸×dpi/96 调整物理尺寸（防挤压/模糊）
+try:
+    import ctypes
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    pass
+
 # 区分打包环境与开发环境
 if getattr(sys, 'frozen', False):
     # PyInstaller --onefile 打包后，资源在临时解压目录
@@ -967,6 +976,22 @@ def main():
         
         # 设置快捷键
         _setup_hotkey(window)
+        
+        # 主窗口跨屏 DPI 自适应（per-monitor v2）：
+        # 拖动到不同 DPI 屏幕时，窗口物理尺寸 = 逻辑尺寸 × dpi/96，内容 1:1 渲染不模糊/不挤压
+        try:
+            from api import api as api_instance
+            api_instance.start_main_dpi_follow(window)
+        except Exception as e:
+            log.warning(f"Main window DPI follow failed: {e}")
+        
+        # 悬浮按钮 UI 线程桥：worker 探测成功后 PostMessage 到主窗口，
+        # 子类化 WndProc 在 UI 线程创建 glass（ULW 内容合成要求 UI 线程）
+        try:
+            from api import api as api_instance
+            api_instance.start_main_hover_bridge(window)
+        except Exception as e:
+            log.warning(f"Main window hover bridge failed: {e}")
         
         # 设置系统托盘
         _setup_tray(window)
