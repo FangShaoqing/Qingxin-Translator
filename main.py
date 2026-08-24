@@ -36,6 +36,45 @@ log.info("=" * 50)
 log.info("Qingxin Translator starting...")
 log.info(f"Proxy: {proxy or 'None'}")
 
+
+def _verify_packaged_components():
+    """打包版启动时校验关键组件完整性（skia/numpy）。
+
+    背景：v0.3.3 起 Skia 自绘窗口依赖 skia.pyd + numpy（39 个原生文件）。
+    应用内更新/手动安装若被中断（复制到一半），会出现主程序已更新但
+    numpy 组件缺失 → 玻璃菜单/按钮/tooltip 全部渲染失败。这里在启动早期
+    检测并弹窗提示用户重新安装（v0.3.5 新增）。
+    """
+    try:
+        if not getattr(sys, 'frozen', False):
+            return  # 开发环境无需校验
+        internal = Path(sys._MEIPASS)  # onefile 解压目录 / onedir 的 _internal
+        missing = []
+        if not (internal / "skia.cp314-win_amd64.pyd").exists():
+            missing.append("Skia 渲染组件")
+        numpy_core = internal / "numpy" / "_core"
+        if not numpy_core.is_dir() or not any(
+                numpy_core.glob("*_multiarray_umath*")):
+            missing.append("numpy 计算组件")
+        if missing:
+            log.warning(f"Packaged components MISSING: {missing} "
+                        f"(install incomplete at {internal})")
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "青欣翻译安装不完整：缺少 " + "、".join(missing) + "。\n"
+                    "这通常是因为安装被中断。请重新运行安装包完成安装，"
+                    "否则部分功能（悬浮按钮/托盘菜单样式）将不可用。",
+                    "青欣翻译 - 安装不完整", 0x10 | 0x40000)  # MB_ICONERROR | MB_SETFOREGROUND
+            except Exception:
+                pass
+    except Exception as e:
+        log.warning(f"Component check failed: {e}")
+
+
+_verify_packaged_components()
+
 import webview
 from api import api
 from app.config import config
