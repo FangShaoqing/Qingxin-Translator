@@ -1945,10 +1945,29 @@ class Api:
                 self._tray_tooltip_anchor = (x, y)
             # 高 DPI 屏（>100%）用 WebView2 回退；100% 屏用 Skia 自绘（自定义圆角+阴影）
             if self._screen_dpi_at(sx, sy) <= 100:
+                # 必须在 UI 线程创建/显示 glass（ULW 内容合成要求，托盘线程创建内容透明
+                # 显示为黑框）——PostMessage 到主窗口，text 经 _pending_tip_text 传递
+                hwnd = getattr(self, "_hover_bridge_hwnd", 0)
+                msg = getattr(self, "_hover_tip_msg", 0)
+                if hwnd and msg:
+                    try:
+                        import ctypes
+                        self._pending_tip_text = text or "青欣翻译"
+                        ctypes.windll.user32.PostMessageW(hwnd, msg, sx, sy)
+                        return
+                    except Exception as e:
+                        log.debug(f"tip glass post failed: {e}")
                 if self._show_tray_tooltip_glass(sx, sy, text or "青欣翻译"):
                     return
                 # glass 渲染失败 → 回退 WebView2（避免 tooltip 不显示）
                 log.warning("Glass tooltip failed, fallback WebView2")
+            self._show_tray_tooltip_webview(sx, sy, text)
+        except Exception as e:
+            log.debug(f"show_tray_tooltip error: {e}")
+
+    def _show_tray_tooltip_webview(self, x: int, y: int, text: str) -> None:
+        """WebView2 版托盘 tooltip 显示（glass 失败/高 DPI 屏的回退路径）"""
+        try:
             if text:
                 try:
                     import json as _json
@@ -1959,9 +1978,9 @@ class Api:
                 except Exception:
                     pass
             time.sleep(0.05)
-            if self._win32_show_tray_tooltip(sx, sy):
+            if self._win32_show_tray_tooltip(x, y):
                 self._tray_tooltip_visible = True
-                self._tray_tooltip_anchor = (sx, sy)  # 记录实际显示锚点（watchdog 用）
+                self._tray_tooltip_anchor = (x, y)  # 记录实际显示锚点（watchdog 用）
                 self._start_tooltip_watchdog()
             # 3 秒后自动隐藏
             if self._tray_tooltip_timer:
@@ -1973,7 +1992,7 @@ class Api:
             self._tray_tooltip_timer.daemon = True
             self._tray_tooltip_timer.start()
         except Exception as e:
-            log.debug(f"show_tray_tooltip error: {e}")
+            log.debug(f"show_tray_tooltip_webview error: {e}")
 
     def _ensure_glass_tip(self):
         """确保托盘 tooltip glass 窗口有效；失效则重建（创建线程退出销毁窗口）"""
@@ -2602,8 +2621,10 @@ class Api:
             GWLP_WNDPROC = -4
             WM_HOVER_GLASS = 0x0400 + 10  # WM_USER+10（悬浮按钮）
             WM_MENU_GLASS = 0x0400 + 11   # WM_USER+11（托盘菜单）
+            WM_TIP_GLASS = 0x0400 + 12    # WM_USER+12（托盘 tooltip）
             self._hover_glass_msg = WM_HOVER_GLASS
             self._hover_menu_msg = WM_MENU_GLASS
+            self._hover_tip_msg = WM_TIP_GLASS
 
             hwnd = self._window_hwnd_of(window)
             if not hwnd:
@@ -2637,6 +2658,17 @@ class Api:
                         return 0
                     except Exception as e:
                         log.debug(f"menu glass bridge error: {e}")
+                if msg == WM_TIP_GLASS:
+                    try:
+                        tip_text = getattr(self, "_pending_tip_text", "") or "青欣翻译"
+                        if not self._show_tray_tooltip_glass(
+                                int(wparam), int(lparam), tip_text):
+                            # glass 失败 → 回退 WebView2（避免黑框/不显示）
+                            log.warning("Glass tooltip failed in bridge, fallback WebView2")
+                            self._show_tray_tooltip_webview(int(wparam), int(lparam), tip_text)
+                        return 0
+                    except Exception as e:
+                        log.debug(f"tip glass bridge error: {e}")
                 return u32.CallWindowProcW(self._hover_bridge_old, h, msg, wparam, lparam)
 
             self._hover_bridge_proc = WNDPROC(_proc)  # 保持引用防 GC

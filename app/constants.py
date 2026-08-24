@@ -10,7 +10,7 @@ from pathlib import Path
 # ==================== 路径常量 ====================
 APP_NAME = "Qingxin Translator"
 APP_NAME_CN = "青欣翻译"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 
 # 区分打包环境与开发环境
 # 打包后：sys._MEIPASS 指向临时解压目录（只读资源在这里）
