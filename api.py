@@ -1518,8 +1518,8 @@ class Api:
         except Exception as e:
             log.debug(f"glass menu click error: {e}")
 
-    def _render_glass_menu(self) -> None:
-        """渲染菜单卡片并更新窗口内容"""
+    def _render_glass_menu(self) -> bool:
+        """渲染菜单卡片并更新窗口内容——成功返回 True（失败时调用方应回退 WebView2）"""
         try:
             data, w, h, rows = render_menu(
                 self._glass_menu_items, hover_idx=self._glass_menu_hover_idx)
@@ -1527,8 +1527,11 @@ class Api:
             ok = self._glass_menu.render(data, w, h)
             if not ok:
                 log.warning("Glass menu render FAILED")
+                return False
+            return True
         except Exception as e:
             log.debug(f"render glass menu error: {e}")
+            return False
 
     def _show_tray_menu_glass(self, x: int, y: int) -> bool:
         """Skia 自绘托盘菜单（100% DPI 屏）——自定义圆角+阴影"""
@@ -1539,7 +1542,8 @@ class Api:
                 return False
             self._glass_menu_items = self._build_glass_menu_items()
             self._glass_menu_hover_idx = -1
-            self._render_glass_menu()
+            if not self._render_glass_menu():
+                return False  # 渲染失败：调用方回退 WebView2（否则显示空白窗口）
             # 窗口尺寸（含阴影 pad）——读取渲染后窗口实际尺寸
             class RECT(ctypes.Structure):
                 _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
@@ -1590,6 +1594,13 @@ class Api:
                     return
                 if self._show_tray_menu_glass(x, y):
                     return
+            self._show_tray_menu_webview(x, y)
+        except Exception as e:
+            log.error(f"show_tray_menu error: {e}", exc_info=True)
+
+    def _show_tray_menu_webview(self, x: int, y: int) -> None:
+        """WebView2 版托盘菜单显示（glass 失败/高 DPI 屏的回退路径）"""
+        try:
             # 先让 JS 刷新状态并自适应尺寸，稍等渲染完成后定位
             try:
                 self._tray_menu_window.evaluate_js(
@@ -1612,7 +1623,7 @@ class Api:
             # 立即隐藏菜单——blur 事件不可靠（菜单可能从未获得焦点）
             self._start_menu_lost_focus_watch()
         except Exception as e:
-            log.error(f"show_tray_menu error: {e}", exc_info=True)
+            log.error(f"show_tray_menu_webview error: {e}", exc_info=True)
 
     def _start_menu_lost_focus_watch(self):
         """监听菜单失焦：前台窗口不再是菜单窗口时隐藏菜单（点击外部关闭）"""
@@ -1934,8 +1945,10 @@ class Api:
                 self._tray_tooltip_anchor = (x, y)
             # 高 DPI 屏（>100%）用 WebView2 回退；100% 屏用 Skia 自绘（自定义圆角+阴影）
             if self._screen_dpi_at(sx, sy) <= 100:
-                self._show_tray_tooltip_glass(sx, sy, text or "青欣翻译")
-                return
+                if self._show_tray_tooltip_glass(sx, sy, text or "青欣翻译"):
+                    return
+                # glass 渲染失败 → 回退 WebView2（避免 tooltip 不显示）
+                log.warning("Glass tooltip failed, fallback WebView2")
             if text:
                 try:
                     import json as _json
@@ -1982,24 +1995,24 @@ class Api:
         except Exception:
             return False
 
-    def _show_tray_tooltip_glass(self, x: int, y: int, text: str) -> None:
-        """Skia 自绘托盘 tooltip（100% DPI 屏）——自定义圆角+阴影"""
+    def _show_tray_tooltip_glass(self, x: int, y: int, text: str) -> bool:
+        """Skia 自绘托盘 tooltip（100% DPI 屏）——自定义圆角+阴影；成功返回 True"""
         try:
             import ctypes
             user32 = ctypes.windll.user32
             if not self._ensure_glass_tip():
-                return
+                return False
             data, w, h = render_tooltip(text)
             ok_render = self._glass_tip.render(data, w, h)
             if not ok_render:
                 log.warning(f"Tray tooltip (glass) render FAILED, rebuilding...")
                 self._glass_tip = None
                 if not self._ensure_glass_tip():
-                    return
+                    return False
                 ok_render = self._glass_tip.render(data, w, h)
                 if not ok_render:
                     log.warning("Tray tooltip (glass) render FAILED after rebuild")
-                    return
+                    return False
             # 定位：卡片左上在鼠标上方（x-48, y-卡高-42，与 WebView2 版一致）；窗口含阴影 pad
             pad = 10
             card_h = 28
@@ -2025,8 +2038,10 @@ class Api:
             self._tray_tooltip_timer.daemon = True
             self._tray_tooltip_timer.start()
             log.debug(f"Tray tooltip (glass) shown at ({mx}, {my}) text={text}")
+            return True
         except Exception as e:
             log.debug(f"show_tray_tooltip_glass error: {e}")
+            return False
 
     def _start_tooltip_watchdog(self):
         """启动监视线程：鼠标移开托盘图标区域（锚点 40px 内）则隐藏 tooltip"""
@@ -2281,7 +2296,10 @@ class Api:
                             except Exception as e:
                                 log.debug(f"hover glass post failed: {e}")
                         if not shown:
-                            self._show_hover_btn_glass(x, y)
+                            if not self._show_hover_btn_glass(x, y):
+                                # glass 失败 → 回退 WebView2（避免按钮不显示）
+                                log.warning("Glass hover btn failed, fallback WebView2")
+                                self._show_hover_btn_webview(x, y)
                     else:
                         self._show_hover_btn_webview(x, y)
                 except Exception as e:
@@ -2436,25 +2454,25 @@ class Api:
             log.debug(f"ensure glass btn failed: {e}")
             return False
 
-    def _show_hover_btn_glass(self, x: int, y: int) -> None:
-        """Skia 自绘悬浮按钮（100% DPI 屏）——自定义圆角+阴影"""
+    def _show_hover_btn_glass(self, x: int, y: int) -> bool:
+        """Skia 自绘悬浮按钮（100% DPI 屏）——自定义圆角+阴影；成功返回 True"""
         try:
             import ctypes
             user32 = ctypes.windll.user32
             # 惰性创建/失效重建
             if not self._ensure_glass_btn():
-                return
+                return False
             data, w, h = render_button()
             ok_render = self._glass_btn.render(data, w, h)
             if not ok_render:
                 log.warning(f"Hover btn (glass) render FAILED at ({x},{y}), rebuilding...")
                 self._glass_btn = None
                 if not self._ensure_glass_btn():
-                    return
+                    return False
                 ok_render = self._glass_btn.render(data, w, h)
                 if not ok_render:
                     log.warning(f"Hover btn (glass) render FAILED after rebuild at ({x},{y})")
-                    return
+                    return False
             # 定位：卡片左上在鼠标右下方（+14,+10，与 WebView2 版一致）；窗口含阴影 pad
             pad = 11
             card_w, card_h = 56, 28
@@ -2480,8 +2498,10 @@ class Api:
             self._hover_btn_timer.daemon = True
             self._hover_btn_timer.start()
             log.debug(f"Hover btn (glass) shown at ({mx}, {my}) render_ok={ok_render} hwnd={self._glass_btn.hwnd}")
+            return True
         except Exception as e:
             log.debug(f"show_hover_btn_glass error: {e}")
+            return False
 
     def _is_mouse_on_own_window(self, x: int, y: int) -> bool:
         """判断屏幕坐标 (x, y) 是否落在应用自身窗口内（排除误触发）
@@ -2602,13 +2622,18 @@ class Api:
             def _proc(h, msg, wparam, lparam):
                 if msg == WM_HOVER_GLASS:
                     try:
-                        self._show_hover_btn_glass(int(wparam), int(lparam))
+                        if not self._show_hover_btn_glass(int(wparam), int(lparam)):
+                            log.warning("Glass hover btn failed in bridge, fallback WebView2")
+                            self._show_hover_btn_webview(int(wparam), int(lparam))
                         return 0
                     except Exception as e:
                         log.debug(f"hover glass bridge error: {e}")
                 if msg == WM_MENU_GLASS:
                     try:
-                        self._show_tray_menu_glass(int(wparam), int(lparam))
+                        if not self._show_tray_menu_glass(int(wparam), int(lparam)):
+                            # glass 渲染失败 → 回退 WebView2（避免空白窗口）
+                            log.warning("Glass menu failed in bridge, fallback WebView2")
+                            self._show_tray_menu_webview(int(wparam), int(lparam))
                         return 0
                     except Exception as e:
                         log.debug(f"menu glass bridge error: {e}")
@@ -2631,7 +2656,10 @@ class Api:
         （GetMessage 循环 + DWM 合成协调），worker 线程实测内容透明。
         """
         try:
-            self._show_hover_btn_glass(x, y)
+            if not self._show_hover_btn_glass(x, y):
+                # glass 失败 → 回退 WebView2（pywebview 主线程可直接调用）
+                log.warning("Glass hover btn failed (js bridge), fallback WebView2")
+                self._show_hover_btn_webview(x, y)
         except Exception as e:
             log.debug(f"hover_glass_show error: {e}")
 
