@@ -16,15 +16,21 @@ from core.logger import log
 user32 = ctypes.windll.user32
 
 
-def _wait_modifiers_released(timeout=1.0):
-    """等待所有修饰键松开（5ms 轮询）"""
+def _wait_modifiers_released(timeout=1.0) -> bool:
+    """等待所有修饰键松开（5ms 轮询）。
+
+    返回 True=已全部松开（并额外稳定等待 60ms，让目标应用菜单栏/焦点状态
+    稳定后再注入）；False=超时仍按住（调用方应放弃注入——此时 SendInput
+    注入 Ctrl+C 会被仍按住的 Alt/Ctrl 修饰，导致复制失败）。
+    """
     VKS = [0x11, 0x10, 0x12, 0x5B, 0x5C]
     deadline = time.time() + timeout
     while time.time() < deadline:
         if not any(user32.GetAsyncKeyState(v) & 0x8000 for v in VKS):
-            return
+            time.sleep(0.06)  # 松开后稳定等待（菜单栏动画/焦点恢复）
+            return True
         time.sleep(0.005)
-    time.sleep(0.05)
+    return False
 
 
 def _try_send_ctrl_c() -> bool:
@@ -61,8 +67,11 @@ def _try_send_ctrl_c() -> bool:
         i.union.ki.dwFlags = flags
         return i
 
-    # 等修饰键松开（超时 0.8s）
-    _wait_modifiers_released(0.8)
+    # 等修饰键松开（超时 0.8s）；用户长按快捷键时不注入（修饰键仍在按下
+    # 会污染注入的 Ctrl+C，Alt 还会激活目标应用菜单栏致复制失败）
+    if not _wait_modifiers_released(0.8):
+        log.debug("Ctrl+C injection skipped: modifiers still pressed")
+        return False
 
     # 主键（X）通常与修饰键同时松开；仅当仍按下时等待
     # （快速检测主键状态，避免固定 sleep 延迟）

@@ -118,21 +118,27 @@ class HotkeyManager:
         log.info("Hotkey poll thread started")
 
     def _poll_loop(self):
-        """轮询按键状态"""
-        fired = set()  # 防止重复触发：已触发的热键 ID
+        """轮询按键状态（松开触发：全部按键按下时标记，全部松开后触发回调）
+
+        松开触发是为了划词翻译的 auto-copy：若在按下瞬间触发，用户手指还按着
+        Ctrl/Alt 等修饰键，SendInput 注入 Ctrl+C 会被修饰（Alt 激活菜单栏/
+        组合被吞），复制失败（v0.3.6 实测 Ctrl+Alt+X 快捷键连续失败）。
+        用户松开快捷键后触发，修饰键已全部释放，注入可靠。
+        """
+        fired = set()  # 已按下待触发的热键 ID（松开时触发）
 
         while self._running and not self._stop_event.is_set():
             try:
                 for hotkey_id, (hotkey_str, vks) in list(self._hotkeys.items()):
                     if self._all_keys_pressed(vks):
-                        if hotkey_id not in fired:
-                            fired.add(hotkey_id)
+                        fired.add(hotkey_id)
+                    else:
+                        if hotkey_id in fired:
+                            fired.discard(hotkey_id)
                             cb = self._callbacks.get(hotkey_id)
                             if cb:
-                                log.info(f"Hotkey triggered: {hotkey_str} (id={hotkey_id})")
+                                log.info(f"Hotkey triggered (keyup): {hotkey_str} (id={hotkey_id})")
                                 threading.Thread(target=cb, daemon=True).start()
-                    else:
-                        fired.discard(hotkey_id)
             except Exception as e:
                 log.error(f"Hotkey poll error: {e}")
 
