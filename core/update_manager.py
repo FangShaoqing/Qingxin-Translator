@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from app.constants import APP_NAME, DATA_DIR
@@ -35,7 +36,11 @@ def _ensure_dirs():
 
 def download_update(url: str, version: str, on_done, on_error) -> bool:
     """
-    后台下载安装包（线程内调用）。
+    后台下载安装包（线程内调用），带自动重试。
+
+    实测（v0.3.7 自动更新）：GitHub 安装包经代理下载易被远端重置连接
+    （WinError 10054 / SSL handshake timed out）。策略：代理 → 直连 →
+    代理 → 直连 最多 4 次尝试，指数退避，最后一次失败才回调 on_error。
 
     Args:
         url: 安装包下载地址
@@ -44,35 +49,61 @@ def download_update(url: str, version: str, on_done, on_error) -> bool:
         on_error: 下载失败回调 (error_msg: str)
     """
     def _run():
+        tmp = None
         try:
             _ensure_dirs()
             # 文件名：QingxinTranslator-Setup-{version}.exe
             safe_version = "".join(c for c in str(version) if c.isalnum() or c in ".-_")
             target = UPDATE_DIR / f"QingxinTranslator-Setup-{safe_version}.exe"
-            
+
             # 已存在且大于 1MB 则直接复用（避免重复下载）
             if target.exists() and target.stat().st_size > 1024 * 1024:
                 log.info(f"Update package already exists: {target}")
                 on_done(str(target))
                 return
-            
+
             import httpx
             from core.proxy_manager import get_proxy_url
             proxy = get_proxy_url()
-            
+
             tmp = target.with_suffix(".part")
-            log.info(f"Downloading update from {url} -> {target}")
-            with httpx.stream("GET", url, timeout=60.0, proxy=proxy, follow_redirects=True) as resp:
-                resp.raise_for_status()
-                total = int(resp.headers.get("content-length", 0))
-                downloaded = 0
-                with open(tmp, "wb") as f:
-                    for chunk in resp.iter_bytes(chunk_size=64 * 1024):
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                os.replace(tmp, target)
-            log.info(f"Update downloaded: {target} ({downloaded} bytes)")
-            on_done(str(target))
+            # 尝试序列：(代理, 用环境变量, 超时秒), (直连, 禁环境变量, 更长超时) 交替
+            # 直连较慢（实测 ~65KB/s），超时需放宽；代理快但易被重置
+            attempts = [(proxy, True, 60), (None, False, 120),
+                        (proxy, True, 60), (None, False, 180)]
+            last_err = None
+            for i, (p, use_env, timeout_s) in enumerate(attempts):
+                try:
+                    log.info(f"Downloading update (attempt {i + 1}/{len(attempts)}, "
+                             f"proxy={p or 'direct'}) {url}")
+                    with httpx.stream(
+                            "GET", url, timeout=timeout_s,
+                            proxy=p, trust_env=use_env,
+                            follow_redirects=True) as resp:
+                        resp.raise_for_status()
+                        total = int(resp.headers.get("content-length", 0))
+                        downloaded = 0
+                        with open(tmp, "wb") as f:
+                            for chunk in resp.iter_bytes(chunk_size=64 * 1024):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                        if total and downloaded != total:
+                            raise IOError(
+                                f"size mismatch: got {downloaded}, expected {total}")
+                    os.replace(tmp, target)
+                    log.info(f"Update downloaded: {target} ({downloaded} bytes)")
+                    on_done(str(target))
+                    return
+                except Exception as e:
+                    last_err = e
+                    log.warning(f"Update download attempt {i + 1} failed: {e}")
+                    try:
+                        if tmp.exists():
+                            tmp.unlink()
+                    except Exception:
+                        pass
+                    time.sleep(2 * (i + 1))  # 指数退避 2s/4s/6s
+            on_error(str(last_err))
         except Exception as e:
             log.error(f"Update download failed: {e}")
             try:
@@ -81,7 +112,7 @@ def download_update(url: str, version: str, on_done, on_error) -> bool:
             except Exception:
                 pass
             on_error(str(e))
-    
+
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return True

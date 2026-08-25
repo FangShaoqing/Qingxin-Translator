@@ -1231,14 +1231,24 @@ window.__onUpdateDownloaded = function(installerPath) {
     });
 };
 
-// 由后端回调：下载失败
+// 由后端回调：下载失败（模态提示，不自动消失；可重试）
 window.__onUpdateDownloadFailed = function(errorMsg) {
     const btn = document.getElementById('update-bar-btn');
     if (btn) {
         btn.disabled = false;
         btn.textContent = '安装';
     }
-    showToast('下载失败: ' + errorMsg, 'error');
+    // 失败原因（如 WinError 10054/SSL 超时）多为网络/代理不稳，给用户重试入口
+    showConfirm(
+        '更新下载失败：' + (errorMsg || '未知错误') + '\n\n请检查网络后重试，或从官网手动下载安装包。',
+        '更新失败',
+        '重试下载',
+        '关闭'
+    ).then((ok) => {
+        if (ok && _updateInfo && _updateInfo.download_url) {
+            startUpdateInstall();
+        }
+    });
 };
 
 // ========== 应用内日志查看器 ==========
