@@ -9,6 +9,7 @@ Qingxin Translator - Selection Translator
 
 import time
 import ctypes
+from ctypes import wintypes
 from typing import Optional, Callable
 
 from core.logger import log
@@ -109,8 +110,37 @@ def _try_send_ctrl_c() -> bool:
         except Exception:
             pass
 
-    # 失败：Ctrl+C 已注入但剪贴板 1s 内无内容（无选区/目标应用对注入免疫如浏览器沙箱）
-    log.debug("Ctrl+C injected but clipboard empty (1s) - no selection or app immune to injection")
+    # 失败：Ctrl+C 已注入但剪贴板 1s 内无内容。记录前台窗口信息以便定位
+    # （无选区 / 目标应用对注入免疫如浏览器沙箱 / 管理员窗口 UIPI 拦截）
+    try:
+        hwnd = user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        title = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, title, 256)
+        exe_path = ""
+        try:
+            # 用局部 WinDLL + 显式签名（禁止改全局 ctypes.windll 的函数签名）
+            k32 = ctypes.WinDLL('kernel32')
+            k32.OpenProcess.restype = ctypes.c_void_p
+            k32.OpenProcess.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_uint]
+            k32.QueryFullProcessImageNameW.restype = ctypes.c_int
+            k32.QueryFullProcessImageNameW.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint)]
+            k32.CloseHandle.argtypes = [ctypes.c_void_p]
+            h = k32.OpenProcess(0x0400 | 0x0010, False, pid.value)  # QUERY_LIMITED|VM_READ
+            if h:
+                buf = ctypes.create_unicode_buffer(1024)
+                sz = ctypes.c_uint(1024)
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(sz)):
+                    exe_path = buf.value
+                k32.CloseHandle(h)
+        except Exception:
+            pass
+        log.warning(f"Ctrl+C injected but clipboard empty: fg_hwnd={hwnd} pid={pid.value} "
+                    f"title={title.value!r} exe={exe_path}")
+    except Exception as e:
+        log.debug(f"foreground window probe failed: {e}")
     # 失败，恢复
     if old_cb:
         try:
