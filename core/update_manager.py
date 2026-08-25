@@ -68,9 +68,12 @@ def download_update(url: str, version: str, on_done, on_error) -> bool:
 
             tmp = target.with_suffix(".part")
             # 尝试序列：(代理, 用环境变量, 超时秒), (直连, 禁环境变量, 更长超时) 交替
-            # 直连较慢（实测 ~65KB/s），超时需放宽；代理快但易被重置
+            # 直连较慢（实测 ~65KB/s），超时需放宽；代理快但易被重置/节点慢
             attempts = [(proxy, True, 60), (None, False, 120),
                         (proxy, True, 60), (None, False, 180)]
+            # 限速阈值：持续平均速率低于 40KB/s 视为节点慢速（实测代理节点
+            # 慢时仅 ~19KB/s），主动中断换下一种方式，避免蜗牛式下载 30+ 分钟
+            MIN_SPEED = 40 * 1024
             last_err = None
             for i, (p, use_env, timeout_s) in enumerate(attempts):
                 try:
@@ -83,10 +86,27 @@ def download_update(url: str, version: str, on_done, on_error) -> bool:
                         resp.raise_for_status()
                         total = int(resp.headers.get("content-length", 0))
                         downloaded = 0
+                        win_bytes = 0
+                        win_t0 = time.time()
                         with open(tmp, "wb") as f:
                             for chunk in resp.iter_bytes(chunk_size=64 * 1024):
                                 f.write(chunk)
                                 downloaded += len(chunk)
+                                win_bytes += len(chunk)
+                                # 每 5 秒评估一次平均速率，过低则中断本次尝试
+                                now = time.time()
+                                if now - win_t0 >= 5.0:
+                                    speed = win_bytes / (now - win_t0)
+                                    log.info(
+                                        f"Update download speed: "
+                                        f"{speed / 1024:.0f}KB/s "
+                                        f"({downloaded / 1048576:.1f}/{total / 1048576:.0f}MB)")
+                                    if speed < MIN_SPEED:
+                                        raise IOError(
+                                            f"download too slow: {speed / 1024:.0f}KB/s "
+                                            f"(<{MIN_SPEED // 1024}KB/s), switch method")
+                                    win_bytes = 0
+                                    win_t0 = now
                         if total and downloaded != total:
                             raise IOError(
                                 f"size mismatch: got {downloaded}, expected {total}")
