@@ -118,27 +118,29 @@ class HotkeyManager:
         log.info("Hotkey poll thread started")
 
     def _poll_loop(self):
-        """轮询按键状态（松开触发：全部按键按下时标记，全部松开后触发回调）
+        """轮询按键状态（松开触发：组合键全部按下时标记，**全部松开后**触发回调）
 
         松开触发是为了划词翻译的 auto-copy：若在按下瞬间触发，用户手指还按着
         Ctrl/Alt 等修饰键，SendInput 注入 Ctrl+C 会被修饰（Alt 激活菜单栏/
         组合被吞），复制失败（v0.3.6 实测 Ctrl+Alt+X 快捷键连续失败）。
-        用户松开快捷键后触发，修饰键已全部释放，注入可靠。
+
+        注意必须是"组合键全部释放"才触发，而不是"任一键释放"就触发：
+        用户松开主键（X）后常习惯继续按住 Ctrl+Alt 等结果——此时若触发，
+        注入前的修饰键等待会超时放弃注入（v0.3.9 实测仍失败）。
         """
-        fired = set()  # 已按下待触发的热键 ID（松开时触发）
+        fired = set()  # 已按下待触发的热键 ID（全部松开时触发）
 
         while self._running and not self._stop_event.is_set():
             try:
                 for hotkey_id, (hotkey_str, vks) in list(self._hotkeys.items()):
                     if self._all_keys_pressed(vks):
                         fired.add(hotkey_id)
-                    else:
-                        if hotkey_id in fired:
-                            fired.discard(hotkey_id)
-                            cb = self._callbacks.get(hotkey_id)
-                            if cb:
-                                log.info(f"Hotkey triggered (keyup): {hotkey_str} (id={hotkey_id})")
-                                threading.Thread(target=cb, daemon=True).start()
+                    elif hotkey_id in fired and self._all_keys_released(vks):
+                        fired.discard(hotkey_id)
+                        cb = self._callbacks.get(hotkey_id)
+                        if cb:
+                            log.info(f"Hotkey triggered (keyup): {hotkey_str} (id={hotkey_id})")
+                            threading.Thread(target=cb, daemon=True).start()
             except Exception as e:
                 log.error(f"Hotkey poll error: {e}")
 
@@ -156,6 +158,10 @@ class HotkeyManager:
             if not (user32.GetAsyncKeyState(vk) & 0x8000):
                 return False
         return True
+
+    def _all_keys_released(self, vks: FrozenSet[int]) -> bool:
+        """检查组合键是否全部松开"""
+        return not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks)
 
     def _parse_hotkey(self, hotkey_str: str) -> Optional[FrozenSet[int]]:
         """解析快捷键为 VK 码集合"""

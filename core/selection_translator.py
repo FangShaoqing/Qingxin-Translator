@@ -72,7 +72,6 @@ def _try_send_ctrl_c() -> bool:
     if not _wait_modifiers_released(0.8):
         log.debug("Ctrl+C injection skipped: modifiers still pressed")
         return False
-
     # 主键（X）通常与修饰键同时松开；仅当仍按下时等待
     # （快速检测主键状态，避免固定 sleep 延迟）
     for _ in range(10):
@@ -110,6 +109,8 @@ def _try_send_ctrl_c() -> bool:
         except Exception:
             pass
 
+    # 失败：Ctrl+C 已注入但剪贴板 1s 内无内容（无选区/目标应用对注入免疫如浏览器沙箱）
+    log.debug("Ctrl+C injected but clipboard empty (1s) - no selection or app immune to injection")
     # 失败，恢复
     if old_cb:
         try:
