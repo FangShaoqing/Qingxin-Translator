@@ -3098,11 +3098,19 @@ class Api:
             from core.selection_translator import selection_translator
             selection_translator.set_translate_callback(self._do_translate)
             
-            # 先获取选中文本（自动复制）
+            # 先获取选中文本（UIA 直读 → SendInput 自动复制）
             text = selection_translator.get_selected_text()
             if not text:
-                self._show_selection_error("自动复制未生效，请先 Ctrl+C 复制，再按快捷键")
-                return {"success": False, "error": "自动复制未生效"}
+                # 目标应用免疫注入（IDEA 等 Java 应用/浏览器）：
+                # 提示用户手动 Ctrl+C，并自动等待剪贴板变化后继续翻译
+                log.info("Selection auto-copy failed, waiting for manual Ctrl+C")
+                self._show_selection_error(
+                    "自动复制未生效：请在目标应用中按 Ctrl+C 复制，将自动继续翻译…")
+                text = selection_translator.wait_user_copy(timeout=8)
+                if not text:
+                    self._show_selection_error(
+                        "自动复制未生效，请先 Ctrl+C 复制，再按快捷键")
+                    return {"success": False, "error": "自动复制未生效"}
             
             # 立即显示"翻译中..."（气泡/窗口），翻译完成后更新内容
             self._show_selection_loading(text)

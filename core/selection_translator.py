@@ -34,6 +34,70 @@ def _wait_modifiers_released(timeout=1.0) -> bool:
     return False
 
 
+_uia_auto = None  # comtypes UIAutomation 单例（复用，避免每次 COM 初始化开销）
+
+
+def uia_get_selection() -> Optional[str]:
+    """UI Automation 直接读取前台焦点元素选中文本（不注入按键）。
+
+    对支持 UIA 文本模式的应用有效（记事本/Word/浏览器等）；不支持时
+    （如 IDEA 未启用 Java Access Bridge）快速失败返回 None。
+    使用 comtypes 生成的 UIAutomationClient 接口（vtable 由 comtypes 处理）。
+    """
+    global _uia_auto
+    try:
+        import comtypes.client
+        from comtypes.gen.UIAutomationClient import (
+            CUIAutomation, IUIAutomationTextPattern, UIA_TextPatternId)
+        if _uia_auto is None:
+            _uia_auto = comtypes.client.CreateObject(CUIAutomation)
+        auto = _uia_auto
+        focused = auto.GetFocusedElement()
+        if not focused:
+            return None
+        pat = focused.GetCurrentPattern(UIA_TextPatternId)
+        if not pat:
+            return None
+        try:
+            text_pat = pat.QueryInterface(IUIAutomationTextPattern)
+        except Exception:
+            return None
+        arr = text_pat.GetSelection()
+        if not arr or arr.Length == 0:
+            return None
+        r = arr.GetElement(0)
+        text = r.GetText(-1)
+        return text or None
+    except Exception:
+        return None
+
+
+def wait_user_copy(timeout=8.0) -> Optional[str]:
+    """等待用户手动 Ctrl+C（目标应用对注入免疫时的兜底）。
+
+    返回复制的文本（剪贴板变化且非空）；超时返回 None。
+    """
+    try:
+        import pyperclip
+        base = ""
+        try:
+            base = pyperclip.paste() or ""
+        except Exception:
+            pass
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.2)
+            try:
+                t = pyperclip.paste()
+                if t and t.strip() and t != base:
+                    return t.strip()
+            except Exception:
+                pass
+        return None
+    except Exception:
+        return None
+
+
 def _try_send_ctrl_c() -> bool:
     """等修饰键松开 → 清剪贴板 → SendInput Ctrl+C → 等剪贴板变化"""
     import pyperclip
@@ -171,6 +235,16 @@ class SelectionTranslator:
 
     def get_selected_text(self) -> Optional[str]:
         log.info("Selection: auto-copy...")
+        # 1) UIA 直读选中文本（不注入按键——对 IDEA 等 Java 应用/浏览器
+        #    SendInput 注入无效，UIA 在支持的应用上最可靠）
+        try:
+            t = uia_get_selection()
+            if t:
+                log.info(f"Selection: got via UIA ({len(t)} chars)")
+                return t.strip()
+        except Exception:
+            pass
+        # 2) SendInput Ctrl+C（注入）
         if _try_send_ctrl_c():
             import pyperclip
             text = pyperclip.paste()

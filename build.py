@@ -57,6 +57,11 @@ config = {
         'httpx',
         'pystray',
         'pystray._win32',
+        # UI Automation（划词 auto-copy 直读选区，v0.3.12+）
+        'comtypes',
+        'comtypes.client',
+        'comtypes.gen',
+        'comtypes.gen.UIAutomationClient',
     ],
     
     # 排除的模块（减小体积）
