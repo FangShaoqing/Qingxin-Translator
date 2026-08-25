@@ -3095,7 +3095,7 @@ class Api:
             # 标记划词活动时间（剪贴板监听防双触发）
             self._last_selection_ts = time.time()
             
-            from core.selection_translator import selection_translator
+            from core.selection_translator import selection_translator, wait_user_copy
             selection_translator.set_translate_callback(self._do_translate)
             
             # 先获取选中文本（UIA 直读 → SendInput 自动复制）
@@ -3106,7 +3106,7 @@ class Api:
                 log.info("Selection auto-copy failed, waiting for manual Ctrl+C")
                 self._show_selection_error(
                     "自动复制未生效：请在目标应用中按 Ctrl+C 复制，将自动继续翻译…")
-                text = selection_translator.wait_user_copy(timeout=8)
+                text = wait_user_copy(timeout=8)
                 if not text:
                     self._show_selection_error(
                         "自动复制未生效，请先 Ctrl+C 复制，再按快捷键")
