@@ -9,13 +9,16 @@ from typing import Any, Optional
 
 from app.constants import CONFIG_FILE, DATA_DIR, _EXE_DIR
 
-# 默认配置（包含开箱即用的 API 配置）
+# 默认配置（首次启动的开箱默认值）
+# ⚠️ 切勿在此提交真实 API Key：本文件受版本控制并公开发布，
+#    写入密钥等于把它交给所有人（v0.3.15 安全修复）。api_key 必须留空，
+#    由用户在「设置 → 翻译引擎」里自行填写。
 DEFAULT_CONFIG = {
     # 翻译引擎
     "engine": "online",
-    "api_url": "https://llm-x3zqff59a3xftxwa.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-    "api_key": "sk-ws-H.EPIPEXE.EZD5.MEUCIDXYK6Py0iVmOh0aZRcPeiCJnc6xBICVv6Pc8vph4W47AiEAkrPSqjwsrvkluCXrgmbGckK5PHACCg72P3CkgY3-0_Q",
-    "api_model": "deepseek-v4-flash-0731",
+    "api_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "api_model": "deepseek-flash",
     
     # 语言设置
     "source_lang": "auto",
