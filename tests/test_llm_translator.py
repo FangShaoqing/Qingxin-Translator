@@ -308,6 +308,131 @@ class TestLLMTokenParam:
         assert payload["thinking"] == {"type": "disabled"}
 
 
+class TestTestConnectionNoConfigMutation:
+    """v0.3.14 回归：测试连接不得读写持久化配置
+
+    历史缺陷：api.test_connection 先把测试参数 config.set()+config.save() 落盘、
+    测完再恢复。期间并发读取会拿到脏值，恢复失败还会永久写坏用户配置。
+    """
+
+    CONFIG_MODEL = "MODEL-FROM-CONFIG"
+    ARG_MODEL = "MODEL-FROM-ARG"
+
+    def _make_translator(self, mock_config):
+        def mock_get(key, default=""):
+            if key == "api_url":
+                return "https://api.deepseek.com/v1"
+            elif key == "api_key":
+                return "config-key"
+            elif key == "api_model":
+                return self.CONFIG_MODEL
+            return default
+
+        mock_config.get.side_effect = mock_get
+        from core.llm_translator import LLMTranslator
+        return LLMTranslator()
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_explicit_model_reaches_request(self, mock_config):
+        """显式传入的 model / key 必须落到请求上，而不是被配置值覆盖"""
+        t = self._make_translator(mock_config)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"choices": [{"message": {"content": "你好"}}]}
+        mock_response.text = "ok"
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = Mock(return_value=mock_client)
+        mock_client.__exit__ = Mock(return_value=False)
+        mock_client.post.return_value = mock_response
+
+        with patch('core.llm_translator.httpx.Client', return_value=mock_client):
+            ok, msg = t.test_connection(
+                "https://api.deepseek.com/v1", "arg-key", self.ARG_MODEL)
+
+        assert ok is True, msg
+        _, kwargs = mock_client.post.call_args
+        assert kwargs["json"]["model"] == self.ARG_MODEL
+        assert kwargs["headers"]["Authorization"] == "Bearer arg-key"
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_no_config_write_during_test(self, mock_config):
+        """测试连接全程不得调用 config.set / config.save"""
+        t = self._make_translator(mock_config)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"choices": [{"message": {"content": "你好"}}]}
+        mock_response.text = "ok"
+
+        mock_client = MagicMock()
+        mock_client.__enter__ = Mock(return_value=mock_client)
+        mock_client.__exit__ = Mock(return_value=False)
+        mock_client.post.return_value = mock_response
+
+        with patch('core.llm_translator.httpx.Client', return_value=mock_client):
+            t.test_connection("https://api.deepseek.com/v1", "arg-key", self.ARG_MODEL)
+
+        mock_config.set.assert_not_called()
+        mock_config.save.assert_not_called()
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_missing_url_or_key_reported(self, mock_config):
+        """参数缺失时给出明确错误，且不触碰配置"""
+        t = self._make_translator(mock_config)
+
+        ok, msg = t.test_connection("", "", self.ARG_MODEL)
+        assert ok is False
+        assert "API URL or API Key is not configured" in msg
+        mock_config.set.assert_not_called()
+        mock_config.save.assert_not_called()
+
+
+class TestModelOverrideAndFallback:
+    """v0.3.14 回归：model 可显式覆盖，且回退值必须被 DeepSeek 端点认识"""
+
+    def _make_translator(self, mock_config, config_model):
+        def mock_get(key, default=""):
+            if key == "api_url":
+                return "https://api.deepseek.com/v1"
+            elif key == "api_key":
+                return "test-key"
+            elif key == "api_model":
+                return config_model
+            return default
+
+        mock_config.get.side_effect = mock_get
+        from core.llm_translator import LLMTranslator
+        return LLMTranslator()
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_build_payload_honours_model_override(self, mock_config):
+        t = self._make_translator(mock_config, "MODEL-FROM-CONFIG")
+        payload = t._build_payload("Hello", "en", "zh", stream=False, model="override-model")
+        assert payload["model"] == "override-model"
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_empty_model_falls_back_to_deepseek(self, mock_config):
+        """空模型时回退到 deepseek-flash，而不是端点不认识的 mimo-v2.5-pro"""
+        t = self._make_translator(mock_config, "")
+        payload = t._build_payload("Hello", "en", "zh", stream=False)
+        assert payload["model"] == "deepseek-flash"
+
+    @patch('core.llm_translator.HTTPX_AVAILABLE', True)
+    @patch('core.llm_translator.config')
+    def test_api_url_override(self, mock_config):
+        t = self._make_translator(mock_config, "deepseek-flash")
+        assert t._build_api_url("https://example.com/v1") == \
+            "https://example.com/v1/chat/completions"
+        assert t._build_api_url() == "https://api.deepseek.com/v1/chat/completions"
+
+
 class TestLLMURLBuilding:
     """Test API URL building logic"""
 

@@ -2821,9 +2821,15 @@ class Api:
             old_hotkey = config.get("hotkey", "")
             old_sel_hotkey = config.get("selection_translate_hotkey", "")
             
+            # 空值处理（v0.3.14 修复）：
+            # api_url / api_key 的前端回填可能为空（如密钥解不开），跳过以免覆盖已有配置；
+            # api_model 为空则是真错误——此前一并静默 continue，导致“设了模型却没保存”无从察觉。
+            if not settings.get("api_model", None) and "api_model" in settings:
+                return {"success": False, "error": "未选择模型，设置未保存（请先在“模型列表”中选择一个模型）"}
+
             for key, value in settings.items():
                 # 跳过空字符串值，避免覆盖已保存的配置
-                if value == "" and key in ("api_url", "api_key", "api_model"):
+                if value == "" and key in ("api_url", "api_key"):
                     continue
                 config.set(key, value)
             config.save()
@@ -2918,31 +2924,20 @@ class Api:
         self.translate_selection()
     
     def test_connection(self, api_url: str, api_key: str, model: str) -> dict:
-        """测试API连接"""
+        """测试API连接
+
+        v0.3.14 修复：此前先把测试参数 config.set() 并 config.save() 落盘、测完再恢复。
+        这会在“测试”期间把活配置改成测试值，若此时划词/翻译并发读取就会拿到脏值，
+        一旦恢复失败用户配置还会被永久写坏。现在直接把参数透传给一次性测试调用，
+        全程不读写持久化配置。
+        """
         try:
             # 验证参数
             if not api_url or not api_key or not model:
                 return {"success": False, "error": "请填写完整的API配置"}
-            
-            # 临时更新配置进行测试
-            original_url = config.get("api_url")
-            original_key = config.get("api_key")
-            original_model = config.get("api_model")
-            
-            config.set("api_url", api_url)
-            config.set("api_key", api_key)
-            config.set("api_model", model)
-            config.save()
-            
-            # 调用LLM翻译器测试
-            success, message = llm_translator.test_connection()
-            
-            # 恢复原始配置
-            config.set("api_url", original_url)
-            config.set("api_key", original_key)
-            config.set("api_model", original_model)
-            config.save()
-            
+
+            success, message = llm_translator.test_connection(api_url, api_key, model)
+
             return {"success": success, "message": message}
         except Exception as e:
             return {"success": False, "error": str(e)}

@@ -113,9 +113,9 @@ class LLMTranslator(TranslatorEngine):
         """检测语言"""
         return language_detector.detect(text)
     
-    def _build_api_url(self) -> str:
-        """构建 API URL"""
-        api_url = config.get("api_url", "").strip().rstrip("/")
+    def _build_api_url(self, api_url: str = None) -> str:
+        """构建 API URL（api_url 为空时取配置）"""
+        api_url = (api_url if api_url is not None else config.get("api_url", "")).strip().rstrip("/")
         
         if api_url.endswith("/chat/completions"):
             return api_url
@@ -125,7 +125,7 @@ class LLMTranslator(TranslatorEngine):
         
         return api_url + "/v1/chat/completions"
     
-    def _build_payload(self, text: str, source_lang: str, target_lang: str, stream: bool = False, is_mixed: bool = False) -> dict:
+    def _build_payload(self, text: str, source_lang: str, target_lang: str, stream: bool = False, is_mixed: bool = False, model: str = None) -> dict:
         """构建请求 payload（兼容 MiMo API）"""
         source_name = LANG_NAMES.get(source_lang, source_lang)
         target_name = LANG_NAMES.get(target_lang, target_lang)
@@ -158,7 +158,9 @@ class LLMTranslator(TranslatorEngine):
             user_prompt = f"Translate the following {source_name} text to {target_name}:\n{text}"
             log.info(f"LLM: translate_mode={mode}")
         
-        model = config.get("api_model") or "mimo-v2.5-pro"
+        # 回退值必须是 DeepSeek 端点认识的模型：此前写死的 "mimo-v2.5-pro" 不属于
+        # api.deepseek.com，一旦 api_model 为空会直接 400（v0.3.14 修复）
+        model = model or config.get("api_model") or "deepseek-flash"
         
         # 根据模型选择正确的 token 参数名
         # MiMo: max_completion_tokens | DeepSeek/GLM/其他: max_tokens
@@ -483,24 +485,30 @@ class LLMTranslator(TranslatorEngine):
         
         raise last_error
     
-    def test_connection(self) -> tuple[bool, str]:
-        """测试 API 连接（使用短超时）"""
+    def test_connection(self, api_url: str = None, api_key: str = None, model: str = None) -> tuple[bool, str]:
+        """测试 API 连接（使用短超时）
+
+        显式传入 api_url / api_key / model 时按参数测试，**不读取也不修改持久化配置**；
+        省略参数时按原行为从配置读取。
+        """
         log.info("Testing LLM connection...")
         
         if not self._available:
             return False, "httpx is not installed"
         
-        if not self.is_available():
+        url = api_url if api_url is not None else config.get("api_url", "")
+        key = api_key if api_key is not None else config.get("api_key", "")
+        
+        if not url or not key:
             return False, "API URL or API Key is not configured"
         
         try:
             # 使用短超时发送测试请求
-            api_url = self._build_api_url()
-            api_key = config.get("api_key", "")
-            payload = self._build_payload("Hello", "en", "zh", stream=False)
+            api_url = self._build_api_url(url)
+            payload = self._build_payload("Hello", "en", "zh", stream=False, model=model)
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
+                "Authorization": f"Bearer {key}"
             }
             
             log.info(f"Test connection: url={api_url}, model={payload.get('model')}, keys={list(payload.keys())}")

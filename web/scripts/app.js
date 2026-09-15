@@ -761,8 +761,19 @@ async function loadSettings() {
         elements.apiKey.value = settings.api_key || '';
         
         // 加载模型列表并恢复上次选择
-        if (settings.api_url && settings.api_key) {
+        // v0.3.14：不再要求 api_key 非空——密钥解不开时此前直接跳过刷新，
+        // 下拉框永远停在占位项，保存又被后端的空值检查静默丢弃，模型看似选了却没生效
+        if (settings.api_url) {
             await refreshModels(settings.api_model);
+            // 列表拉取失败时至少回填已保存的模型，保证界面与配置一致
+            if (!elements.modelSelect.value && settings.api_model) {
+                elements.modelSelect.innerHTML = '<option value=""></option>';
+                const saved = document.createElement('option');
+                saved.value = settings.api_model;
+                saved.textContent = settings.api_model;
+                elements.modelSelect.appendChild(saved);
+                elements.modelSelect.value = settings.api_model;
+            }
         }
     } catch (error) {
         console.error('加载设置失败:', error);
@@ -798,9 +809,12 @@ async function refreshModels(selectModel = null) {
     const apiUrl = elements.apiUrl.value;
     const apiKey = elements.apiKey.value;
     
-    if (!apiUrl || !apiKey) {
+    if (!apiUrl) {
         return;
     }
+    
+    // 记住切换前的选择：本地列表里找不到的模型要显式落盘，否则界面显示与磁盘配置会分叉
+    const previousModel = elements.modelSelect.value;
     
     try {
         const result = await callApi('get_models', apiUrl, apiKey);
@@ -815,12 +829,28 @@ async function refreshModels(selectModel = null) {
                 elements.modelSelect.appendChild(option);
             });
             
+            let fallback = false;
             // 选择指定模型或第一个模型
             if (selectModel && result.models.some(m => m.id === selectModel)) {
                 elements.modelSelect.value = selectModel;
             } else if (result.models.length > 0) {
                 elements.modelSelect.value = result.models[0].id;
+                fallback = true;
             }
+            
+            // 关键修复（v0.3.14）：程序化赋值不会触发 change 事件，必须显式保存，
+            // 否则下拉框显示新模型、config.json 里仍是旧模型（翻译仍走旧模型报 400）
+            const changed = elements.modelSelect.value && elements.modelSelect.value !== previousModel;
+            if (changed) {
+                await saveSettings(false);
+            }
+            
+            // 原模型已不在可用列表：明确告知用户，不再静默改写
+            if (fallback && selectModel && selectModel !== elements.modelSelect.value) {
+                showToast(`原模型 ${selectModel} 已不可用，已切换为 ${elements.modelSelect.value}`, 'error', 5000);
+            }
+        } else if (!result.success) {
+            showToast(result.error || '获取模型列表失败', 'error');
         }
     } catch (error) {
         console.error('获取模型列表失败:', error);
